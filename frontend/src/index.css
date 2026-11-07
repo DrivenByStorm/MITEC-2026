@@ -1,0 +1,73 @@
+/* Fonts are bundled with the app so the console works with no internet. */
+@import '@fontsource/barlow/400.css';
+@import '@fontsource/barlow/500.css';
+@import '@fontsource/barlow/600.css';
+@import '@fontsource/barlow-semi-condensed/500.css';
+@import '@fontsource/barlow-semi-condensed/600.css';
+
+:root {
+  /* Palette: desert survey plat, read in full sun. */
+  --playa: #dce2e4; /* app background, pale dust */
+  --paper: #f4f6f6; /* panels */
+  --ground: #eceeea; /* map ground */
+  --basalt: #1e2a2f; /* primary ink */
+  --slate: #56656b; /* secondary ink */
+  --rule: #c3cccf; /* borders */
+  --p3: #e2580b; /* installed P3 units: the containers are this orange */
+  --teal: #0e7c86; /* robots and machines */
+  --hivis: #e8c200; /* people: hi-vis vests */
+  --alert: #b8322a;
+  --ok: #2f7d4f;
+  --stale: #98a3a7;
+
+  --font-body: 'Barlow', system-ui, sans-serif;
+  --font-data: 'Barlow Semi Condensed', 'Barlow', system-ui, sans-serif;
+
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--basalt);
+  background: var(--playa);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
