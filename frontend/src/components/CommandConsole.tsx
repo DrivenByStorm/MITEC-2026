@@ -13,9 +13,11 @@ interface Props {
   messages: Message[]
   onSubmit: (text: string) => void
   compact: boolean
+  examples?: string[]
+  intro?: string
 }
 
-export function CommandConsole({ messages, onSubmit, compact }: Props) {
+export function CommandConsole({ messages, onSubmit, compact, examples = EXAMPLES, intro = 'Ask about the site or give an instruction. Try one of these:' }: Props) {
   const [value, setValue] = useState('')
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -67,9 +69,9 @@ export function CommandConsole({ messages, onSubmit, compact }: Props) {
         <div className="console__log" ref={logRef} aria-live="polite">
           {messages.length === 0 ? (
             <div className="console__empty">
-              <p>Ask about the site or give an instruction. Try one of these:</p>
+              <p>{intro}</p>
               <ul className="chips">
-                {EXAMPLES.map((ex) => (
+                {examples.map((ex) => (
                   <li key={ex}>
                     <button type="button" className="chip" onClick={() => onSubmit(ex)}>{ex}</button>
                   </li>
@@ -90,6 +92,15 @@ export function CommandConsole({ messages, onSubmit, compact }: Props) {
         <p className="console__last" aria-live="polite">
           <span className="msg__who">Site</span> {[...messages].reverse().find((m) => m.from === 'site')?.text.split('\n')[0]}
         </p>
+      )}
+      {!compact && messages.length > 0 && examples.length > 0 && (
+        <ul className="chips console__quick" aria-label="Suggested commands">
+          {examples.map((ex) => (
+            <li key={ex}>
+              <button type="button" className="chip" onClick={() => onSubmit(ex)}>{ex}</button>
+            </li>
+          ))}
+        </ul>
       )}
       <form className="console__form" onSubmit={submit}>
         <label htmlFor="site-input" className="visually-hidden">Message to the site</label>
