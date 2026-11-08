@@ -62,10 +62,10 @@ class Net:
     def _log(self, level, text, *_):
         self.log_lines.append(text)
 
-    def add_task(self, label="Pile row A-01", ready=True, x=300, y=0):
+    def add_task(self, label="Pile row A-01", ready=True, x=300, y=0, requires="pile", priority=3):
         self._seq += 1
         tid = f"T-{self._seq:03d}"
-        self.hub.add_task({"id": tid, "seq": self._seq, "kind": "pile", "label": label, "requires": "pile", "priority": 3, "x": x, "y": y, "units": ["u1", "u2"], "rect": None}, ready)
+        self.hub.add_task({"id": tid, "seq": self._seq, "kind": "pile", "label": label, "requires": requires, "priority": priority, "x": x, "y": y, "units": ["u1", "u2"], "rect": None}, ready)
         return tid
 
     def run(self, seconds, until=None):
@@ -132,7 +132,7 @@ def test_two_hops_and_local_views():
     # D is far away and unreachable.
     n = Net(positions={"A": (200, 0), "B": (300, 0), "C": (400, 0), "D": (5000, 5000)}, work_s=1000)
     tid = n.add_task(x=200)
-    n.run(1.0, until=lambda: tid in n.robots["C"].tasks)
+    n.run(6, until=lambda: tid in n.robots["C"].tasks)
     check(tid in n.robots["C"].tasks, "C (three radio hops from the gateway) received the task")
     check(tid not in n.robots["D"].tasks, "unreachable D has no record of the task")
     # The round can't finish without D (fixed participants; silence isn't a decline).
@@ -154,7 +154,7 @@ def test_broken_relay_stalls_then_resumes():
     print("broken relay path stalls agreement; restored delivery resumes it:")
     n = Net(scores={"A": 72, "B": 86, "C": 64}, work_s=1000)
     tid = n.add_task()
-    n.run(0.6, until=lambda: tid in n.robots["C"].tasks)  # task has reached C
+    n.run(6, until=lambda: tid in n.robots["C"].tasks)  # task has reached C
     n.tx.cut_link("B", "C")
     n.run(30)
     check(n.hub.tasks[tid]["state"] not in ("assigned", "in_progress"), f"no owner while B–C is cut (state {n.hub.tasks[tid]['state']})")
@@ -192,7 +192,7 @@ def test_hub_off_after_delivery():
     print("hub off after task delivery; connected robots still agree:")
     n = Net(scores={"A": 72, "B": 86, "C": 64}, work_s=1000)
     tid = n.add_task()
-    n.run(1.0, until=lambda: all(tid in n.robots[r].tasks for r in "ABC"))
+    n.run(6, until=lambda: all(tid in n.robots[r].tasks for r in "ABC"))
     n.hub_on = False
     n.hub.online = False
     n.run(15)
@@ -230,7 +230,7 @@ def test_unavailable_candidate_cancels_attempt():
     print("candidate becomes unavailable before commitment: attempt cancelled, new round:")
     n = Net(scores={"A": 72, "B": 86, "C": 64}, work_s=1000)
     tid = n.add_task()
-    n.run(0.4, until=lambda: 1 in n.robots["B"].rounds and n.robots["B"].rounds[1]["myBid"])
+    n.run(6, until=lambda: 1 in n.robots["B"].rounds and n.robots["B"].rounds[1]["myBid"])
     n.bodies["B"]["mode"] = "paused"
     n.run(20, until=lambda: n.hub.tasks[tid]["owner"])
     check(n.hub.tasks[tid]["owner"] == "A", f"A (next best) owns it after a new round (rounds {n.hub.tasks[tid]['rounds']})")
@@ -252,6 +252,45 @@ def test_lossy_mesh_still_converges():
     tid = n.add_task()
     n.run(60, until=lambda: n.hub.tasks[tid]["owner"])
     check(n.hub.tasks[tid]["owner"] == "B" and n.owners(tid) == {"B"}, "B owns it, nobody else started")
+
+
+def test_pacing_waits_for_a_free_robot():
+    print("pacing: no round opens while every capable robot is busy; it opens as soon as one frees up:")
+    n = Net(positions={"A": (200, 0)}, work_s=12)
+    t1 = n.add_task("Pile row 1")
+    t2 = n.add_task("Pile row 2")
+    n.run(8, until=lambda: n.hub.tasks[t1]["owner"])
+    check(n.hub.tasks[t1]["owner"] == "A", "A took task 1")
+    n.run(5)
+    check(n.hub.tasks[t2]["rounds"] == [], "no round for task 2 while A is busy")
+    check(n.hub.task_view(n.hub.tasks[t2])["stateLabel"] == "Waiting for a free robot", "task 2 shows as waiting for a free robot")
+    n.run(20, until=lambda: n.hub.tasks[t2]["owner"])
+    check(n.hub.tasks[t2]["owner"] == "A", "A took task 2 after finishing task 1")
+    check(all(r["status"] != "no_eligible" for r in n.hub.rounds.values()), f"no wasted rounds ({len(n.hub.rounds)} rounds, none ended No eligible robot)")
+
+
+def test_pacing_skips_work_nobody_can_do():
+    print("pacing: a task no free robot has the tool for waits; lower-priority work it can do goes first:")
+    n = Net(work_s=1000)
+    layout = n.add_task("Stake row 1", requires="layout", priority=5)
+    pile = n.add_task("Pile row 1", priority=1)
+    n.run(15, until=lambda: n.hub.tasks[pile]["owner"])
+    check(n.hub.tasks[pile]["owner"] is not None, f"the pile task went out and was assigned to {n.hub.tasks[pile]['owner']}")
+    check(n.hub.tasks[layout]["rounds"] == [], "the layout task never opened a round (no robot has a layout tool)")
+
+
+def test_pacing_recovers_from_a_stale_belief():
+    print("pacing: if the hub wrongly thinks a robot is free, the round ends No eligible robot and it self-corrects:")
+    n = Net(positions={"A": (200, 0)}, work_s=10)
+    t1 = n.add_task("Pile row 1")
+    n.run(8, until=lambda: n.hub.tasks[t1]["owner"])
+    n.hub.heard["A"]["available"] = True  # stale: A is actually busy
+    t2 = n.add_task("Pile row 2")
+    n.run(6, until=lambda: n.hub.tasks[t2]["state"] == "no_eligible")
+    check(n.hub.tasks[t2]["state"] == "no_eligible", "the round ended No eligible robot (A declined: busy)")
+    check(not n.hub.heard["A"]["available"], "A's busy decline corrected the hub's belief")
+    n.run(25, until=lambda: n.hub.tasks[t2]["owner"])
+    check(n.hub.tasks[t2]["owner"] == "A", "A took task 2 once it finished task 1")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

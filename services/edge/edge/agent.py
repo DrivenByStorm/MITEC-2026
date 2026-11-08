@@ -50,6 +50,8 @@ the gateway GW and the hub (HUB, the edge server, wired to GW) are mesh nodes. R
 and to relays within {ASSET_RANGE_M} m; packets are forwarded hop by hop. The hub introduces row tasks: "Stake row A-03" (rovers), \
 then "Pile row A-03" (pile drivers), then "Check row A-03" (rovers), and "Survey block A" (drone) once a block is piled. \
 Allocation is EMULATED bidding and consensus: the hub announces one task per round with a fixed set of participants (every robot). \
+It only opens a round when it believes a robot with the needed tool is free (from heartbeats, completed/released status, commits \
+and "busy" declines); other ready tasks show "Waiting for a free robot". \
 Each robot sends one frozen bid (or a decline), waits for a bid or decline from every participant (silence isn't a decline), picks \
 the highest score (ties to the lowest robot ID) and sends AGREE with a fingerprint of the bid set. The tentative winner commits only \
 after matching AGREEs from every participant, then starts work. Neither the hub nor you pick winners. A missing response leaves the \

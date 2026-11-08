@@ -330,7 +330,7 @@ class RobotAgent:
             self._next_hb = now + ALLOC["heartbeatS"] * (0.85 + 0.3 * self.tx.rand())
             a = self.assignment
             self._send("HEARTBEAT", payload={
-                "available": self.available(), "battery": round(self.body["energy"]), "mode": self.body["mode"],
+                "available": self.available(), "tools": sorted(self.tools), "battery": round(self.body["energy"]), "mode": self.body["mode"],
                 "assignment": {k: a[k] for k in ("id", "taskId", "revision", "roundId", "state", "done", "total")} if a else None,
             })
         if len(self.rounds) > 60:

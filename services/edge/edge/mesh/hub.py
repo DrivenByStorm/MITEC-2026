@@ -1,6 +1,11 @@
 """The hub (edge server): introduces tasks, opens one allocation round at a time and displays
 what it hears. It never picks a winner; robots agree among themselves over the mesh, and the
 hub's view is built only from packets it receives through the gateway.
+
+Pacing: the hub only opens a round when it believes some robot with the right tool is free.
+That belief comes from what it hears: heartbeats (availability + tools), completed or released
+status, commits, and "busy" declines. It can be stale; a wrong guess either costs a round that
+ends "No eligible robot" or delays a task until the next heartbeat corrects it.
 """
 
 from __future__ import annotations
@@ -112,9 +117,29 @@ class HubAgent:
                 self._announce(t, rnd["id"])
             return
         queue = [self.tasks[i] for i in self.order if self.tasks[i]["state"] == "queued" and not self.tasks[i]["deferred"]]
-        if queue:
-            queue.sort(key=lambda t: (-t["priority"], t["seq"]))
-            self._open_round(queue[0])
+        queue.sort(key=lambda t: (-t["priority"], t["seq"]))
+        for t in queue:
+            # Highest-priority task that a robot we believe is free could take.
+            if self.free_for(t["requires"]):
+                self._open_round(t)
+                break
+
+    # ---------- who the hub believes is free ----------
+
+    def _believe(self, rid: str, available: bool) -> None:
+        if rid not in self.participants:
+            return
+        h = self.heard.setdefault(rid, {"at": self.tx.now})
+        was = h.get("available")
+        h["available"] = available
+        if available and not was:
+            self._undefer()
+
+    def free_for(self, requires: str) -> list[str]:
+        """Robots the hub believes are free and have this tool (recently heard only)."""
+        now = self.tx.now
+        return [rid for rid, h in self.heard.items()
+                if h.get("available") and requires in (h.get("tools") or ()) and now - h["at"] <= ALLOC["uncertainS"]]
 
     # ---------- inbox ----------
 
@@ -122,6 +147,9 @@ class HubAgent:
         if not self.online:
             return
         self.inbox_count += 1
+        o = pkt["origin_id"]
+        if o in self.participants:
+            self.heard.setdefault(o, {})["at"] = self.tx.now  # any packet from a robot shows it's alive and reachable
         h = getattr(self, f"_on_{pkt['type'].lower()}", None)
         if h:
             h(pkt)
@@ -139,6 +167,8 @@ class HubAgent:
         p = pkt["payload"]
         rnd["bids"].setdefault(pkt["origin_id"], p.get("score"))
         rnd["reasons"].setdefault(pkt["origin_id"], p.get("reason"))
+        if p.get("score") is None and p.get("reason") in ("busy", "paused", "low battery"):
+            self._believe(pkt["origin_id"], False)
         t = self.tasks[rnd["taskId"]]
         if rnd["status"] == "open" and t["state"] == "announced":
             t["state"] = "bidding"
@@ -177,6 +207,7 @@ class HubAgent:
         if rnd["commit"]:
             return  # duplicates can't create another owner
         rnd["commit"] = {"owner": owner, "assignmentId": assignment_id}
+        self._believe(owner, False)
         t = self.tasks[rnd["taskId"]]
         if rnd["status"] == "open":
             self._close_round(rnd, "committed", f"Assigned to {owner}")
@@ -192,6 +223,7 @@ class HubAgent:
             return  # old task revision
         state = p.get("state")
         if state == "attempt_cancelled":
+            self._believe(p.get("owner"), False)
             rnd = self._round(pkt)
             if rnd and rnd["status"] == "open":
                 self._close_round(rnd, "cancelled", f"{p.get('owner')} {p.get('reason', 'unavailable')} before commit")
@@ -210,6 +242,7 @@ class HubAgent:
                 t["state"], t["owner"] = "in_progress", owner
                 t["done"], t["total"] = p.get("done", t["done"]), p.get("total", t["total"])
         elif state == "completed":
+            self._believe(owner, True)  # don't wait for its next heartbeat
             if t["owner"] in (None, owner):
                 t["state"], t["owner"] = "completed", owner
                 t["done"] = t["total"]
@@ -217,6 +250,7 @@ class HubAgent:
                 self.on_complete(t)
                 self._undefer()
         elif state == "released":
+            self._believe(owner, True)
             if t["state"] == "cancel_requested":
                 t["state"] = "cancelled"
                 self.log("info", f"{owner} stopped {t['label']}; task cancelled.", owner)
@@ -229,10 +263,9 @@ class HubAgent:
     def _on_heartbeat(self, pkt: dict) -> None:
         rid = pkt["origin_id"]
         p = pkt["payload"]
-        prev = self.heard.get(rid)
-        self.heard[rid] = {"at": self.tx.now, **p}
-        if p.get("available") and not (prev and prev.get("available")):
-            self._undefer()
+        h = self.heard.setdefault(rid, {})
+        h.update({"at": self.tx.now, "tools": p.get("tools"), "battery": p.get("battery"), "mode": p.get("mode")})
+        self._believe(rid, bool(p.get("available")))  # the heartbeat is the robot's own word
         a = p.get("assignment")
         if not a:
             return
@@ -311,7 +344,7 @@ class HubAgent:
     def task_view(self, t: dict) -> dict:
         return {
             "id": t["id"], "label": t["label"], "kind": t["kind"], "requires": t["requires"], "priority": t["priority"], "revision": t["revision"],
-            "state": t["state"], "stateLabel": STATE_LABEL["held" if t["state"] == "queued" and t["deferred"] else t["state"]], "owner": t["owner"], "assignmentId": t["assignmentId"],
+            "state": t["state"], "stateLabel": STATE_LABEL["held" if t["state"] == "queued" and (t["deferred"] or not self.free_for(t["requires"])) else t["state"]], "owner": t["owner"], "assignmentId": t["assignmentId"],
             "roundId": t["roundId"], "rounds": t["rounds"][-6:], "done": t["done"], "total": t["total"], "x": t["x"], "y": t["y"],
             "uncertain": self.owner_uncertain(t), "deferred": t["deferred"],
         }

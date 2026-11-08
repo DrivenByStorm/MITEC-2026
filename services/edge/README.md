@@ -35,13 +35,13 @@ Follows "Exowatt Mesh Network and Digital Twin" (8 Nov 2026): the twin shows rob
 **Tasks** (`site_mesh.py`). The hub introduces one task per row of the approved plan: *Stake row* (rovers), then *Pile row* (pile drivers), then *Check row* (rovers), plus *Survey block* (the drone) once every row in a block is piled. The hub unlocks a task only after it hears the earlier one is complete. Queue order: priority, then task ID.
 
 **Allocation** (`robot.py`, `hub.py`, `rules.py`). One round at a time, one active task per robot:
-1. The hub sends `TASK_ANNOUNCE` with the fixed participants (every robot), and re-announces every 4 s while the round is open.
+1. The hub picks the highest-priority ready task that a robot it **believes is free** could do, and sends `TASK_ANNOUNCE` with the fixed participants (every robot). It re-announces every 4 s while the round is open. The belief comes only from what the hub hears: heartbeats (availability and tools), completed/released status, commits and "busy" declines. If it's wrong, the round ends *No eligible robot* (and the declines correct it), or the task waits for the next heartbeat. Other ready tasks show *Waiting for a free robot*.
 2. Each participant sends one frozen `BID`: 100 − 4 per 100 m of travel − 0.3 per % of battery used, or an explicit decline (busy, paused, no tool, low battery). Silence is not a decline.
 3. With a response from every participant, each robot picks the highest score (ties to the lowest robot ID) and sends `AGREE` with the winner and a fingerprint of the ordered bid set, task revision and round.
 4. The tentative winner commits only with matching `AGREE`s from every participant (its own included), and only if it's still available. The emulated consensus component records one commit and an idempotent assignment ID; it never picks a winner. The winner broadcasts `COMMIT` and only then starts work.
-5. `STATUS` reports progress, completion or a confirmed release. `HEARTBEAT` (every ~3 s) carries availability and the current assignment, so the hub catches up on anything it missed.
+5. `STATUS` reports progress, completion or a confirmed release. `HEARTBEAT` (every ~3 s) carries availability, tools and the current assignment, so the hub catches up on anything it missed.
 
-Failures: BID/AGREE are retried every 3 s; robots that already concluded repeat their bid and agreement when a participant is still asking. Old revisions and rounds are ignored, and duplicates can't create a second owner or restart completed work. A round open 20 s+ shows as *stalled*; the participant set never shrinks. A winner that became unavailable sends `attempt_cancelled` and the hub opens a new round. After commitment, an owner not heard for 7 s is shown as *uncertain* but keeps the task; reassignment needs an explicit release. **Release** and **Cancel** bump the task revision and wait for the owner to confirm it stopped before a new round opens. If everyone declines, the round closes as *No eligible robot* and similar tasks wait until a robot reports it's free.
+Failures: BID/AGREE are retried every 3 s; robots that already concluded repeat their bid and agreement when a participant is still asking. Old revisions and rounds are ignored, and duplicates can't create a second owner or restart completed work. A round open 20 s+ shows as *stalled*; the participant set never shrinks. A winner that became unavailable sends `attempt_cancelled` and the hub opens a new round. After commitment, an owner not heard for 7 s is shown as *uncertain* but keeps the task; reassignment needs an explicit release. **Release** and **Cancel** bump the task revision and wait for the owner to confirm it stopped before a new round opens. If everyone declines anyway (a stale belief), the round closes as *No eligible robot* and similar tasks wait until a robot reports it's free.
 
 Manager controls (UI or approved agent suggestion): `task.cancel`, `task.release`, `task.priority`, `mesh.cutLink`, `mesh.restoreLink`, `mesh.relay`, `mesh.hub`, `mesh.latency`, `mesh.loss`. Mesh robots' position reports reach the twin over this mesh too, so a robot with no path to the hub goes stale on the map.
 
@@ -88,7 +88,7 @@ edge/
 data/site-dem.json   real terrain for the site
 tests/
   test_flow.py   end to end over the WebSocket with a scripted Claude stand-in
-  test_mesh.py   the mesh acceptance checks (two hops, convergence, stalls, duplicates, hub off, release)
+  test_mesh.py   the mesh acceptance checks (two hops, convergence, stalls, duplicates, hub off, release) and pacing
   run_fake.py    run the service with the stand-in, for UI work without an API key
 ```
 
