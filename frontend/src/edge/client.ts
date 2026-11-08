@@ -6,7 +6,7 @@
 
 import { useEffect, useSyncExternalStore } from 'react'
 import type { SurveySnapshot } from '../survey/types'
-import type { TwinSnapshot } from '../twin/types'
+import type { SiteClock, TwinSnapshot } from '../twin/types'
 import type { SitePlan } from '../buildup/types'
 import type { Pt } from '../survey/types'
 import type { PacketHop } from '../mesh/types'
@@ -36,6 +36,10 @@ export type ActionName =
   | 'mesh.hub'
   | 'mesh.latency'
   | 'mesh.loss'
+  | 'sim.speed'
+  | 'sim.pause'
+  | 'sim.skipShift'
+  | 'sim.pauseAtDayEnd'
 
 export type Act = (name: ActionName, args?: Record<string, unknown>) => Promise<ActionResult>
 
@@ -105,6 +109,8 @@ export interface EdgeState {
   preview: TwinSnapshot | null
   planVersion: number
   twin: TwinSnapshot | null
+  /** Site clock and speed dial (also inside twin snapshots during construction). */
+  clock: SiteClock | null
   chat: ChatMessage[]
   agent: AgentState
 }
@@ -167,6 +173,7 @@ class EdgeClient {
       preview: null,
       planVersion: 0,
       twin: null,
+      clock: null,
       chat: [],
       agent: { online: false, status: 'connecting', busy: false, activity: '', model: '' },
     }
@@ -252,9 +259,11 @@ class EdgeClient {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private addTraces(m: any) {
-    // Mesh times are seconds on the edge service's mesh clock; place them on our own clock.
+    // Mesh times are seconds on the edge service's mesh clock; place them on our own clock,
+    // played back at the simulation speed.
     const now = Date.now()
-    const toLocal = (t: number) => now + (t - m.meshNow) * 1000
+    const speed = m.speed > 0 ? m.speed : 1
+    const toLocal = (t: number) => now + ((t - m.meshNow) * 1000) / speed
     const byId = new Map(this.traces.map((t, i) => [t.id, i]))
     for (const r of m.traces) {
       const hop: PacketHop = { ...r, t0: toLocal(r.t0), t1: toLocal(r.t1) }
@@ -297,15 +306,16 @@ class EdgeClient {
           preview: m.preview ?? null,
           planVersion: m.planVersion,
           twin: m.twin ?? null,
+          clock: m.clock ?? null,
           chat: m.chat ?? [],
           agent: m.agent,
         })
         return
       }
       case 'survey':
-        return this.set({ survey: m.snapshot, ...this.applyCoverage(m.coverage) })
+        return this.set({ survey: m.snapshot, ...this.applyCoverage(m.coverage), ...(m.clock ? { clock: m.clock } : {}) })
       case 'twin':
-        return this.set({ twin: m.snapshot ?? null })
+        return this.set({ twin: m.snapshot ?? null, ...(m.snapshot?.clock ? { clock: m.snapshot.clock } : {}) })
       case 'traces':
         return this.addTraces(m)
       case 'plan':

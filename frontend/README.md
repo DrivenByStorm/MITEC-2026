@@ -52,14 +52,15 @@ Set the boundary distance on the map and start the survey, or ask the agent. The
 
 ## Buildup stage
 
-Enter **P3 units to build** and **Crew available**, then **Generate plan**, or ask the agent. The number of units is always yours. The planner decides the layout on flat mapped ground, the relays (every unit within reach of two), the fleet and crew, and the schedule. **Plan details** gives the reason for every quantity. **Approve and build** starts construction of exactly that plan. About 40 s in, a relay fails on purpose so you can watch traffic reroute.
+Enter **P3 units to build** and **Crew available**, then **Generate plan**, or ask the agent. The number of units is always yours. The planner decides the layout on flat mapped ground, the relays (every unit within reach of two), the fleet and crew, and the schedule. **Plan details** gives the reason for every quantity. **Approve and build** starts construction of exactly that plan. About 40 site seconds in, a relay fails on purpose (for 3 minutes) so you can watch traffic reroute.
 
 ## What's on screen (construction)
 
 - **Site plan:** P3 units (orange = set, dotted = foundation ready, dashed = planned), robots and machines (teal), people (yellow), relay masts (diamonds), mesh links and relay coverage. Drag to pan, scroll to zoom, click anything to select it.
 - **Freshness:** when the twin stops hearing from an asset, it fades and then turns grey with a "last heard" age. The map always shows the last *reported* position, never a guess.
 - **Site mesh:** robot links (dashed), the relay backbone and the hub's wire, with packets moving along the hops they actually took (announce blue, bid amber, agree purple, commit green, status teal; heartbeats optional). The box at the top left, labelled *Emulated bidding and consensus*, shows the current round; click it for the task.
-- **Expanded view:** details for the selected asset with pause/resume (and, for robots and relays, their mesh neighbors with **Cut link**), plus Overview, **Tasks** (task states, and per round: each bid the hub received, each robot's proposed winner, the tentative winner's matching agreements; Release / Cancel / Raise priority), **Mesh** (delay, loss, hub on/off, path to hub per robot, packet counters), Machines, People, Network, Requests and Activity tabs.
+- **Time dial (top of the map):** site day and time, pause, 1× to 900×, **Skip to end of shift**, and **Pause at the end of each day**. 1× is real time at the plan's rates (a pile takes 2 minutes), so speed up to watch the build. Packets show at 2× or slower. During the survey the dial runs 1× to 20×.
+- **Expanded view:** details for the selected asset with pause/resume (and, for robots and relays, their mesh neighbors with **Cut link**), plus Overview, **Days** (units set out of the total, a plan-vs-actual chart of piled and set units by day with a hover readout, a table of each day's staked/piled/set and set-vs-plan, and the daily log), **Tasks** (task states, and per round: each bid the hub received, each robot's proposed winner, the tentative winner's matching agreements; Release / Cancel / Raise priority), **Mesh** (delay, loss, hub on/off, path to hub per robot, packet counters), Machines, People, Network, Requests and Activity tabs.
 
 ## How it's built
 
@@ -75,7 +76,8 @@ src/
     overlay.ts       unbuildable-ground image
   twin/
     types.ts         construction snapshot (as sent by the edge service)
-    freshness.ts     live / lagging / stale
+    freshness.ts     live / lagging / stale (stretched at high sim speed)
+    siteTime.ts      site clock formatting (UTC)
   mesh/
     types.ts         site mesh snapshot and packet hops (as sent by the edge service)
     labels.ts        round summaries
@@ -84,6 +86,7 @@ src/
     BuildupView.tsx / PlanPanel.tsx                    buildup planning
     ConstructionView.tsx / SiteMap.tsx / StatePanel.tsx construction
     MeshLayer.tsx / MeshPanels.tsx                     mesh links, packet animation, tasks and mesh tabs
+    TimeDial.tsx / DaysTab.tsx                         speed dial, day-by-day tracker
     CommandConsole.tsx  chat with the site agent, suggestion cards
     Topbar.tsx, usePanZoom.ts
   App.tsx            stage switching, connection screen

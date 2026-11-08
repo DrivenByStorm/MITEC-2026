@@ -81,7 +81,7 @@ class Monitor:
         sim = self.site.sim
         if not sim:
             return
-        now = time.time()
+        now = self.site.now_ms() / 1000  # site seconds
         if not self._twin_started:
             self._twin_started = True
             self._twin_event_id = sim.events[0]["id"] if sim.events else 0
@@ -99,6 +99,8 @@ class Monitor:
                 self.findings.append(text)
             elif "attempt cancelled" in text:
                 self.findings.append(text)
+            elif text.startswith("Day ") and " done." in text:
+                self.findings.append(text + " (End of shift: a one-line daily summary is welcome; no need to repeat the numbers.)")
             elif text.startswith("All ") and "Construction complete" in text:
                 self.findings.append(text)
             elif text.startswith("Proximity stop:") and e.get("assetId"):
@@ -110,11 +112,15 @@ class Monitor:
                     self._prox_flagged[e["assetId"]] = now
                     self.findings.append(f"{e['assetId']} has had {len(q)} proximity stops in the last {PROXIMITY_WINDOW_S // 60} minutes (latest: {text[len('Proximity stop: '):]}). Crews may be working too close to it.")
 
-        now_ms = now * 1000
+        now_ms = self.site.now_ms()
+        fresh_shift = now_ms - self.site.shift_started_ms < 60_000  # everyone reports again in the first minute
+        stale_s = STALE_S + self.site.clock.effective_speed() * 0.6  # same slack the UI uses at high speed
         for a in sim.reported.values():
+            if fresh_shift:
+                break
             if a["kind"] == "relay":
                 continue
-            stale = now_ms - a["lastHeard"] > STALE_S * 1000
+            stale = now_ms - a["lastHeard"] > stale_s * 1000
             if stale and a["id"] not in self._stale:
                 self._stale.add(a["id"])
                 self.findings.append(f"{a['name']} ({a['role']}) hasn't reported for over {STALE_S} s; last seen doing: {a['task']}.")

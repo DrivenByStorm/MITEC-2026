@@ -118,4 +118,64 @@ export interface TwinSnapshot {
   requests: AssetRequest[]
   /** The site mesh during construction: nodes, links, tasks, allocation rounds, robot views. */
   mesh?: MeshSnapshot
+  /** Site clock and speed dial. */
+  clock?: SiteClock
+  /** Day-by-day progress against the plan. */
+  schedule?: Schedule
+}
+
+/** Site time. `ms` is UTC epoch ms on the site's own calendar: format it in UTC. */
+export interface SiteClock {
+  day: number
+  time: string
+  ms: number
+  speed: number
+  /** 0 when paused; the skip speed while skipping to the end of the shift. */
+  effectiveSpeed: number
+  paused: boolean
+  onShift: boolean
+  shiftStart: string
+  shiftEnd: string
+  shiftLeftMin: number
+  pauseAtDayEnd: boolean
+  skipping: boolean
+  speeds: number[]
+  surveySpeeds: number[]
+  /** Above this speed, packets move too fast to animate. */
+  packetsMaxSpeed: number
+}
+
+export interface DayCounts {
+  staked: number
+  piled: number
+  set: number
+}
+
+export interface ScheduleDay {
+  day: number
+  /** Today, still running. */
+  live: boolean
+  /** Units that moved into each stage this day. */
+  did: DayCounts
+  /** Cumulative at the end of the day (or now, for today). */
+  total: DayCounts
+  /** Cumulative the plan expects by the end of this day. */
+  expected: DayCounts
+  tasksDone: number
+  rounds: number
+  roundsNoEligible: number
+  roundsStalled: number
+  relayOutages: number
+  refusals: number
+  proximityStops: number
+  summary?: string
+}
+
+export interface Schedule {
+  units: number
+  planDays: number
+  /** Expected cumulative units at the end of each planned day. */
+  curve: (DayCounts & { day: number })[]
+  days: ScheduleDay[]
+  complete: boolean
 }

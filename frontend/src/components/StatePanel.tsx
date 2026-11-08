@@ -3,6 +3,8 @@ import type { Asset, AssetRequest, TwinSnapshot } from '../twin/types'
 import { ageSeconds, formatAge, freshness } from '../twin/freshness'
 import type { Act } from '../edge/client'
 import { MeshTab, NodeMesh, RobotMesh, TasksTab } from './MeshPanels'
+import { DaysTab } from './DaysTab'
+import { siteTime } from '../twin/siteTime'
 
 interface Props {
   snapshot: TwinSnapshot
@@ -15,7 +17,7 @@ interface Props {
   onTab?: (t: Tab) => void
 }
 
-const TABS = ['Overview', 'Tasks', 'Mesh', 'Machines', 'People', 'Network', 'Requests', 'Activity'] as const
+const TABS = ['Overview', 'Days', 'Tasks', 'Mesh', 'Machines', 'People', 'Network', 'Requests', 'Activity'] as const
 export type Tab = (typeof TABS)[number]
 
 export function StatePanel({ snapshot, selectedId, onSelect, act, selectedTask, onSelectTask, tab: tabProp, onTab }: Props) {
@@ -24,7 +26,7 @@ export function StatePanel({ snapshot, selectedId, onSelect, act, selectedTask, 
   const setTab = onTab ?? setOwnTab
   const selected = snapshot.assets.find((a) => a.id === selectedId)
   const mesh = snapshot.mesh
-  const tabs = TABS.filter((t) => mesh || (t !== 'Tasks' && t !== 'Mesh'))
+  const tabs = TABS.filter((t) => (mesh || (t !== 'Tasks' && t !== 'Mesh')) && (snapshot.schedule || t !== 'Days'))
   const selectTask = (id: string | undefined) => {
     onSelectTask?.(id)
     if (id) setTab('Tasks')
@@ -47,6 +49,7 @@ export function StatePanel({ snapshot, selectedId, onSelect, act, selectedTask, 
 
       <div className="panel__body" role="tabpanel">
         {tab === 'Overview' && <Overview snapshot={snapshot} onSelect={onSelect} />}
+        {tab === 'Days' && snapshot.schedule && <DaysTab schedule={snapshot.schedule} clock={snapshot.clock} />}
         {tab === 'Tasks' && mesh && <TasksTab mesh={mesh} selectedTask={selectedTask} onSelectTask={selectTask} onSelectAsset={onSelect} act={act} />}
         {tab === 'Mesh' && mesh && <MeshTab mesh={mesh} onSelectAsset={onSelect} act={act} />}
         {tab === 'Machines' && (
@@ -372,7 +375,7 @@ function Activity({ snapshot, onSelect }: { snapshot: TwinSnapshot; onSelect: (i
 }
 
 function clock(t: number) {
-  return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+  return siteTime(t)
 }
 
 /** A real place to offer in the "request a telehandler" example: row 1 of the first block. */

@@ -33,15 +33,16 @@ from fastapi.responses import JSONResponse
 from .agent import NO_UPDATE, SiteAgent
 from .monitor import Monitor
 from .site import ACTIONS, ActionError, Site
+from .clock import PACKETS_MAX_SPEED
 from .survey.session import TICK_S as SURVEY_TICK_S
-from .twin.simulator import TICK_S as TWIN_TICK_S
 
 log = logging.getLogger("edge")
 
 AGENT_MIN_INTERVAL_S = float(os.environ.get("AGENT_MIN_INTERVAL_S", "20"))
 AGENT_PROACTIVE = os.environ.get("AGENT_PROACTIVE", "1") != "0"
-MESH_STEP_S = 0.1
-TRACE_EVERY = 2  # mesh steps per traces batch
+SITE_STEP_S = 0.1  # construction loop period (wall seconds); the clock's speed decides site time per step
+TRACE_EVERY = 2  # steps per traces batch
+TWIN_EVERY = 5  # steps per twin snapshot
 SURVEY_EVENTS = 60
 TWIN_EVENTS = 80
 CHAT_LIMIT = 300
@@ -72,7 +73,7 @@ class EdgeApp:
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._twin_loop()), asyncio.create_task(self._mesh_loop()), asyncio.create_task(self._agent_loop())]
+        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._site_loop()), asyncio.create_task(self._agent_loop())]
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -87,7 +88,9 @@ class EdgeApp:
         n = 0
         while True:
             await asyncio.sleep(SURVEY_TICK_S)
-            self.site.tick_survey()
+            if self.site.stage == "survey":
+                for _ in range(self.site.survey_ticks()):
+                    self.site.tick_survey()
             self.monitor.check()
             active = self.site.survey.phase in ("scouting", "surveying")
             n += 1
@@ -95,27 +98,25 @@ class EdgeApp:
                 await self._broadcast_survey()
             await self._broadcast_changes()
 
-    async def _twin_loop(self) -> None:
-        while True:
-            await asyncio.sleep(TWIN_TICK_S)
-            if self.site.sim:
-                self.site.tick_twin()
-                self.monitor.check()
-                await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
-
-    async def _mesh_loop(self) -> None:
+    async def _site_loop(self) -> None:
+        """Construction: advance the site clock (twin + mesh) and stream what changed."""
         n = 0
         while True:
-            await asyncio.sleep(MESH_STEP_S)
-            mesh = self.site.mesh
-            if not mesh:
+            await asyncio.sleep(SITE_STEP_S)
+            site = self.site
+            if not site.sim or not site.mesh:
                 continue
-            self.site.tick_mesh(MESH_STEP_S)
+            rolled = site.advance(SITE_STEP_S)
+            self.monitor.check()
             n += 1
+            mesh = site.mesh
             if n % TRACE_EVERY == 0:
                 traces = mesh.take_traces()
-                if traces and self.clients:
-                    await self._broadcast({"type": "traces", "meshNow": round(mesh.tx.now, 3), "wall": now_ms(), "traces": traces})
+                speed = site.clock.effective_speed()
+                if traces and self.clients and 0 < speed <= PACKETS_MAX_SPEED:
+                    await self._broadcast({"type": "traces", "meshNow": round(mesh.tx.now, 3), "speed": speed, "traces": traces})
+            if rolled or n % TWIN_EVERY == 0:
+                await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
 
     async def _agent_loop(self) -> None:
         while True:
@@ -145,6 +146,9 @@ class EdgeApp:
         snap["events"] = snap["events"][:TWIN_EVENTS]
         if self.site.mesh:
             snap["mesh"] = self.site.mesh.snapshot()
+        if self.site.days:
+            snap["schedule"] = self.site.days.view()
+        snap["clock"] = self.site.clock.view()
         return snap
 
     def _plan_msg(self) -> dict:
@@ -159,6 +163,7 @@ class EdgeApp:
             "type": "hello",
             "terrain": {**s.terrain.info(), "heightsDm": s.terrain.heights_dm_b64()},
             "network": self.site.network_info(),
+            "clock": self.site.clock.view(),
             "stage": self.site.stage,
             "survey": self._survey_snapshot(),
             "coverage": {"version": s.coverage_version, "bits": self.site.coverage_b64()},
@@ -172,7 +177,7 @@ class EdgeApp:
 
     async def _broadcast_survey(self) -> None:
         s = self.site.survey
-        msg: dict = {"type": "survey", "snapshot": self._survey_snapshot()}
+        msg: dict = {"type": "survey", "snapshot": self._survey_snapshot(), "clock": self.site.clock.view()}
         if s.coverage_version != self._coverage_sent:
             self._coverage_sent = s.coverage_version
             msg["coverage"] = {"version": s.coverage_version, "bits": self.site.coverage_b64()}
@@ -264,7 +269,7 @@ class EdgeApp:
 
     async def _handle_action(self, ws: WebSocket, msg: dict) -> None:
         name, args = str(msg.get("name")), msg.get("args") or {}
-        quiet = name in ("survey.setDistance", "mesh.latency", "mesh.loss")  # slider drags shouldn't flood the chat
+        quiet = name in ("survey.setDistance", "mesh.latency", "mesh.loss") or name.startswith("sim.")  # dials shouldn't flood the chat
         try:
             text = self.site.run_action(name, args)
             ok = True
@@ -274,7 +279,7 @@ class EdgeApp:
         label = self.site.describe_action(name, args)
         if not quiet:
             await self._post(**{"from": "site"}, text=text, action=label, ok=ok)
-        if ok and name != "survey.setDistance":
+        if ok and name != "survey.setDistance" and not name.startswith("sim."):
             self.agent.note(f"{label}. Result: {text}")
         await self._after_change()
 
@@ -303,7 +308,7 @@ class EdgeApp:
         for m in self.chat:
             changed = False
             for card in m.get("suggestions") or []:
-                if card["status"] == "pending" and ACTIONS[card["action"]][0] != self.site.stage:
+                if card["status"] == "pending" and ACTIONS[card["action"]][0] not in (self.site.stage, "any"):
                     card["status"] = "expired"
                     card["result"] = f"No longer applies: the site has moved on to {self.site.stage}."
                     changed = True

@@ -106,7 +106,9 @@ class SiteMesh:
     # ---------- time ----------
 
     def step(self, dt: float) -> None:
-        n = max(1, round(dt / SUBSTEP_S))
+        # Fine steps at normal speed; at high speed at most 20 steps per call (rounds still finish
+        # inside a step, because robots answer from their packet handlers).
+        n = max(1, min(round(dt / SUBSTEP_S), 20))
         for _ in range(n):
             self.tx.advance(dt / n)
             for r in self.robots.values():
@@ -177,6 +179,7 @@ class SiteMesh:
         if a is None:
             n = len(self.tx.cut)
             self.tx.cut.clear()
+            self.tx.invalidate()
             if n:
                 self.sim.log("info", f"All {n} removed mesh links restored.")
             return f"Restored {n} removed link{'s' if n != 1 else ''}." if n else "No links were removed."
@@ -193,6 +196,7 @@ class SiteMesh:
             return f"The hub is already {'on' if online else 'off'}."
         self.hub_online = online
         self.hub.online = online
+        self.tx.invalidate()
         if online:
             self.sim.log("info", "Hub back on the mesh. It catches up from robot status and heartbeats.")
             return "Hub is back on. It will catch up on anything it missed from the robots' status and heartbeats."

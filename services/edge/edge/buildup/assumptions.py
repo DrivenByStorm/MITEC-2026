@@ -20,6 +20,8 @@ ASSUMPTIONS: dict[str, float] = {
     "pileRobotPilesPerDay": 300,  # per 10 h shift; Built Robotics quotes 300+ for the RPD 35
     "pileRobotCrew": 2,  # robot operator + pile loader (Built Robotics' two-person crew)
     "layoutRovers": 3,  # autonomous layout rovers that stake rows and check piles. ESTIMATE
+    "roverStakeUnitsPerDay": 120,  # units one rover stakes per shift (8 pile positions each). ESTIMATE
+    "roverCheckUnitsPerDay": 200,  # units one rover checks per shift after piling. ESTIMATE
     # ---- setting units ----
     "craneUnitsPerDay": 16,  # ESTIMATE (~1 every 35-40 min)
     "craneCrew": 4,  # crane operator, two riggers, signal person

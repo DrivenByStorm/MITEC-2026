@@ -71,6 +71,10 @@ How you work:
   already handled (e.g. traffic rerouted with no loss of contact), reply with exactly {NO_UPDATE}. Otherwise write a short \
   heads-up, with a proposal if there's a clear next step.
 - Messages starting with [Manager action] tell you what the manager did directly with the UI; take them into account.
+
+Time: construction runs at the plan's real rates on a site clock (Day 1 07:00, 10-hour shifts, nights skipped). The manager \
+can speed it up (1x to 900x), pause it, or skip to the end of the shift (sim.speed, sim.pause, sim.skipShift). Durations you \
+see ("last heard 40 s ago", round ages) are site time. Use get_schedule for progress against the plan by day.
 """
 
 ACTION_NAMES = list(ACTIONS)
@@ -144,6 +148,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_mesh_status",
         "description": "Mesh health: nodes up/down and whether they reach the hub, removed links, delay and loss settings, hub on/off, each robot's availability, assignment, last heartbeat, and packet counters.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_schedule",
+        "description": "Day-by-day construction progress: units staked, piled and set each day and in total against the plan's expected pace, tasks done, rounds, stalls, relay outages and refusals, plus each finished day's summary. Also the site clock and sim speed.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -307,8 +316,12 @@ class SiteAgent:
                 "paused": [a["name"] for a in assets if a["mode"] == "paused"],
                 "openRequests": [r["id"] for r in snap["requests"] if r["status"] not in ("done", "cancelled")],
                 "uplink": "up" if snap["uplink"]["online"] else "down",
-                "minutesElapsed": round(site.sim.tick_count / 60, 1),
+                "siteTime": f"Day {site.clock.day}, {site.clock.hhmm(site.clock.time_of_day)}",
+                "simSpeed": f"{site.clock.effective_speed():g}x" + (" (paused)" if site.clock.paused else ""),
             }
+            if site.days:
+                today = site.days.view()["days"][-1]
+                out["construction"]["today"] = {"did": today["did"], "totalSoFar": today["total"], "planExpectsByEndOfDay": today["expected"], "planDays": site.plan["totalDays"]}
         if site.mesh:
             m = site.mesh.snapshot()
             cur = next((r for r in m["rounds"] if r["status"] == "open"), None)
@@ -389,12 +402,12 @@ class SiteAgent:
         if not hit:
             return {"error": f"No asset matching '{args.get('query')}'."}
         result["select"] = hit["id"]
-        return self._describe(hit, int(time.time() * 1000))
+        return self._describe(hit, self.site.now_ms())
 
     def _tool_list_assets(self, args, result):
         if not self.site.sim:
-            return {"assets": [self._describe(a, int(time.time() * 1000)) for a in self._assets()], "note": "Construction hasn't started; these are the survey drones."}
-        now = int(time.time() * 1000)
+            return {"assets": [self._describe(a, self.site.now_ms()) for a in self._assets()], "note": "Construction hasn't started; these are the survey drones."}
+        now = self.site.now_ms()
         items = [self._describe(a, now) for a in self._assets()]
         if args.get("kind"):
             items = [a for a in items if a["kind"] == args["kind"]]
@@ -434,7 +447,7 @@ class SiteAgent:
         events = site.sim.events if site.sim else site.survey.events
         lvl, contains = args.get("level"), str(args.get("contains") or "").lower()
         out = [e for e in events if (not lvl or e["level"] == lvl) and (not contains or contains in e["text"].lower())]
-        now = time.time() * 1000
+        now = site.now_ms() if site.sim else time.time() * 1000
         return [{"secondsAgo": round((now - e["at"]) / 1000), "level": e["level"], "text": e["text"]} for e in out[: int(args.get("limit") or 15)]]
 
     def _tool_get_tasks(self, args, result):
@@ -481,6 +494,16 @@ class SiteAgent:
             "packets": snap["stats"],
         }
 
+    def _tool_get_schedule(self, args, result):
+        site = self.site
+        if not site.days:
+            return {"note": "Construction hasn't started. The plan expects about %s working days." % (site.plan["totalDays"] if site.plan else "?")}
+        v = site.days.view()
+        c = site.clock
+        keep = ("day", "live", "did", "total", "expected", "tasksDone", "rounds", "roundsStalled", "relayOutages", "refusals", "summary")
+        return {"clock": {"day": c.day, "time": c.hhmm(c.time_of_day), "shift": f"{c.hhmm(c.shift_start)}-{c.hhmm(c.shift_end)}", "speed": c.effective_speed(), "paused": c.paused},
+                "units": v["units"], "planDays": v["planDays"], "days": [{k: d[k] for k in keep} for d in v["days"][-12:]]}
+
     def _tool_list_requests(self, args, result):
         sim = self.site.sim
         if not sim:
@@ -520,6 +543,7 @@ def _tool_label(name: str, args: dict) -> str:
         "get_tasks": "Checked mesh tasks" + (f" ({', '.join(str(v) for v in args.values())})" if args else ""),
         "get_round": f"Looked at round {args['roundId']}" if args.get("roundId") else "Looked at the current round",
         "get_mesh_status": "Checked the mesh",
+        "get_schedule": "Checked the day-by-day progress",
         "propose_action": f"Suggested: {args.get('action', '')}",
     }.get(name, name)
 

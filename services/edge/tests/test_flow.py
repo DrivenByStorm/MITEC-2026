@@ -91,6 +91,18 @@ def main():
             ws.send_text(json.dumps({"type": "chat", "text": "release that rover"}))
             m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent" and m["message"]["suggestions"])
             print("suggested:", m["message"]["suggestions"][0]["label"])
+            # time dial: speed up, skip the rest of day 1, check the day tracker rolled over
+            for i, (name, args) in enumerate([("sim.speed", {"x": 300}), ("sim.skipShift", {})]):
+                ws.send_text(json.dumps({"type": "action", "id": 40 + i, "name": name, "args": args}))
+                r = recv_until(ws, lambda m: m["type"] == "result")
+                print(f"  {name}: {r['ok']} {r['text'][:80]}")
+            t = recv_until(ws, lambda m: m["type"] == "twin" and m["snapshot"]["clock"]["day"] == 2, limit=20000)
+            sch = t["snapshot"]["schedule"]
+            print("day 2:", t["snapshot"]["clock"]["time"], "day 1 summary:", sch["days"][0]["summary"])
+            assert sch["days"][0]["summary"] and sch["days"][0]["total"]["staked"] > 0
+            ws.send_text(json.dumps({"type": "chat", "text": "how did the day go?"}))
+            m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent" and not m["message"].get("proactive"))
+            print("schedule tools:", m["message"]["tools"])
     # tool results never errored
     for call in fake.messages.calls:
         for msg in call["messages"]:

@@ -4,6 +4,10 @@ The autonomous robots (pile drivers, layout rovers, the survey drone) don't pick
 here: they take row tasks through the site mesh (edge/mesh), where they bid and agree on an owner.
 This module is their bodies: it moves them and runs whatever task they committed to.
 
+Time: `tick(dt)` advances `dt` site seconds. Work runs at the plan's real rates (see `Rates`),
+so a pile-driving robot takes the plan's 16 minutes per unit; the site clock (edge/clock.py)
+and its speed dial decide how fast that plays on screen.
+
 It keeps two copies of the world:
   - truth: where things really are and what they are really doing;
   - reported: what the digital twin has actually heard over the radio.
@@ -20,12 +24,15 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 import time
 
 from .network import ASSET_RANGE_M, LORA_RANGE_M, RELAY_RANGE_M
 
-TICK_S = 1.0
 PROXIMITY_STOP_M = 12
+PROXIMITY_HOLD_S = 5
+PROXIMITY_COOLDOWN_S = 120
+REQUEST_ON_STATION_S = 15 * 60  # an equipment request is done after this long on station
 SITE_NAME = "New site, Pecos County TX"
 
 SURNAMES = ["Reyes", "Okafor", "Lindqvist", "Ortiz", "Patel", "Begay", "Nguyen", "Castillo", "Hale", "Andrade", "Whitehorse", "Kowalski", "Mensah", "Duarte", "Ibarra", "Sato", "Haddad", "Morales", "Becker", "Yazzie", "Ferreira", "Ochoa", "Brennan", "Vargas", "Chen", "Silva", "Tran", "Navarro", "Abbott", "Romero", "Kaur", "Delgado", "Murphy", "Salazar", "Novak", "Aguilar", "Jensen", "Fuentes", "Rossi", "Garza"]
@@ -34,6 +41,30 @@ INITIALS = "ABCDEFGHJKLMNPRSTW"
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _chance(per_second: float, dt: float) -> float:
+    """Probability something with this per-second rate happens within dt."""
+    return 1 - math.exp(-per_second * dt)
+
+
+class Rates:
+    """How long the work takes, in site seconds, from the plan's assumptions."""
+
+    def __init__(self, A: dict):
+        shift = A["shiftMinutes"] * 60
+        self.shift = shift
+        self.pile_unit = A["pilesPerUnit"] / A["pileRobotPilesPerDay"] * shift  # 8/300 of a shift = 16 min
+        self.stake_unit = shift / A.get("roverStakeUnitsPerDay", 120)
+        self.check_unit = shift / A.get("roverCheckUnitsPerDay", 200)
+        self.crane_unit = shift / A["craneUnitsPerDay"]  # 37.5 min
+        self.th_load = A["telehandlerLoadMin"] * 60
+        self.th_handoff = A["telehandlerHandoffMin"] * 60
+        self.th_speed = A["telehandlerSpeedKmh"] / 3.6
+        self.trencher_speed = A["trencherMPerDay"] / shift
+        # Drain over a shift; everything recharges or refuels overnight.
+        self.drain_machine = 40 / shift
+        self.drain_tag = 10 / shift
 
 
 def dist(ax, ay, bx, by) -> float:
@@ -50,10 +81,15 @@ class _Rand:
 
 
 class SimulatedSite:
-    def __init__(self, plan: dict):
+    def __init__(self, plan: dict, now_ms=None):
         self.plan = plan
+        self.now_ms = now_ms or _now_ms  # the site clock (edge/clock.py); wall time if none
+        self.rates = Rates(plan["assumptions"])
         self.rand = _Rand(7)
-        self.tick_count = 0
+        self.elapsed = 0.0  # site seconds of work simulated (shift time only)
+        self._dt = 1.0
+        self._next_uplink_check = 1800.0
+        self.counters: Counter = Counter()  # running totals for the day tracker
         self.truth: dict[str, dict] = {}
         self.reported: dict[str, dict] = {}
         self.links: list[dict] = []
@@ -61,8 +97,8 @@ class SimulatedSite:
         self.requests: list[dict] = []
         self._event_seq = 1
         self._request_seq = 1
-        self.proximity_cooldown: dict[str, int] = {}
-        self.uplink = {"online": True, "lastSync": _now_ms()}
+        self.proximity_cooldown: dict[str, float] = {}
+        self.uplink = {"online": True, "lastSync": self.now_ms()}
         self.last_installed: dict | None = None
         self.complete_logged = False
         self.reachable_relays: set[str] = set()
@@ -82,7 +118,7 @@ class SimulatedSite:
 
         self._build_assets()
         self._compute_network()
-        now = _now_ms()
+        now = self.now_ms()
         for t in self.truth.values():
             self._report(t, now, "lora" if t["kind"] == "worker" else "mesh")
         nb = len(plan["blocks"])
@@ -128,7 +164,7 @@ class SimulatedSite:
             return f"I couldn't find a place called {target_text}. Try a unit (C-03-07), a block and row (B7), a block (block B), laydown, office, or an asset name."
         req = {
             "id": f"REQ-{self._request_seq:03d}",
-            "createdAt": _now_ms(),
+            "createdAt": self.now_ms(),
             "requestedBy": requested_by,
             "need": need,
             "target": target,
@@ -162,7 +198,7 @@ class SimulatedSite:
             return f"No relay called {relay_id}."
         if t["mode"] == "offline":
             return f"{t['name']} is already down."
-        self._fail_relay(t, _now_ms(), 10 ** 6)
+        self._fail_relay(t, self.now_ms(), 10 ** 6)
         return f"{t['name']} is down. It stays down until you bring it back."
 
     def relay_up(self, relay_id: str) -> str:
@@ -256,30 +292,30 @@ class SimulatedSite:
         park = 0
         n_pile, n_crane, n_th, n_tr = self._count("pile"), self._count("crane"), self._count("telehandler"), self._count("trencher")
         for i in range(1, n_pile + 1):
-            self._add_truth(id=f"RPD-{i}", name=f"RPD-{i}", kind="robot", role="Pile driver", **self._parking(park), mode="idle", speed=9, task="Available")
+            self._add_truth(id=f"RPD-{i}", name=f"RPD-{i}", kind="robot", role="Pile driver", **self._parking(park), mode="idle", speed=1.5, task="Available")
             park += 1
         for i in range(1, self._count("rover") + 1):
-            self._add_truth(id=f"LR-{i}", name=f"LR-{i}", kind="robot", role="Layout rover", **self._parking(park), mode="idle", speed=6, task="Available", energy=70 + self.rand() * 30)
+            self._add_truth(id=f"LR-{i}", name=f"LR-{i}", kind="robot", role="Layout rover", **self._parking(park), mode="idle", speed=1.2, task="Available", energy=70 + self.rand() * 30)
             park += 1
         for i in range(1, n_crane + 1):
-            self._add_truth(id=f"CR-{i}", name=f"CR-{i}", kind="machine", role="Crane", **self._parking(park), mode="manual", speed=7, task="Waiting for foundations")
+            self._add_truth(id=f"CR-{i}", name=f"CR-{i}", kind="machine", role="Crane", **self._parking(park), mode="manual", speed=0.8, task="Waiting for foundations")
             park += 1
         for i in range(1, n_th + 1):
-            self._add_truth(id=f"TH-{i}", name=f"TH-{i}", kind="machine", role="Telehandler", **self._parking(park), mode="manual", speed=10, serves=f"CR-{(i - 1) % max(1, n_crane) + 1}", shuttleLeg="crane", task="Loading first unit")
+            self._add_truth(id=f"TH-{i}", name=f"TH-{i}", kind="machine", role="Telehandler", **self._parking(park), mode="manual", speed=self.rates.th_speed, serves=f"CR-{(i - 1) % max(1, n_crane) + 1}", shuttleLeg="crane", task="Loading first unit")
             park += 1
         # Trenchers: split blocks between them; each runs a spine trench down the west edge of its blocks.
         for i in range(1, n_tr + 1):
             mine = [b for k, b in enumerate(plan["blocks"]) if k % n_tr == i - 1]
             wps = [p for b in mine for p in ({"x": b["x"] - 5, "y": b["y"]}, {"x": b["x"] - 5, "y": b["y"] + b["h"]})]
             self._add_truth(
-                id=f"TR-{i}", name=f"TR-{i}", kind="machine", role="Trencher", **self._parking(park), mode="manual", speed=1.5,
+                id=f"TR-{i}", name=f"TR-{i}", kind="machine", role="Trencher", **self._parking(park), mode="manual", speed=self.rates.trencher_speed,
                 waypoints=wps or [dict(self.laydown_pt)], task=f"Trenching block{'s' if len(mine) > 1 else ''} {', '.join(b['id'] for b in mine)}",
             )
             park += 1
         # Drone: waits at the office until it wins a block survey over the mesh.
         if self._count("drone"):
             o = plan["office"]
-            self._add_truth(id="DR-1", name="DR-1", kind="drone", role="Survey drone", x=o["x"] + 20, y=o["y"] + 20, mode="idle", speed=14, task="Available",
+            self._add_truth(id="DR-1", name="DR-1", kind="drone", role="Survey drone", x=o["x"] + 20, y=o["y"] + 20, mode="idle", speed=12, task="Available",
                             home={"x": o["x"] + 20, "y": o["y"] + 20})
 
         # Crew: every person the plan calls for, attached to the machine or job they work on.
@@ -294,7 +330,7 @@ class SimulatedSite:
             r = 32 + self.rand() * 20  # crews work outside the machine's swing/stop zone
             ox, oy = math.cos(a) * r, math.sin(a) * r
             start = self._anchor_for(group, {"x": ox, "y": oy})
-            self._add_truth(id=wid, name=name, kind="worker", role=role, x=start["x"], y=start["y"], mode="manual", speed=4, group=group,
+            self._add_truth(id=wid, name=name, kind="worker", role=role, x=start["x"], y=start["y"], mode="manual", speed=1.2, group=group,
                             anchorOffset={"x": 0, "y": 0} if in_cab else {"x": ox, "y": oy}, inCab=in_cab, task=role, energy=55 + self.rand() * 45)
 
         for r in plan["crew"]:
@@ -330,14 +366,23 @@ class SimulatedSite:
             p = self.last_installed or {"x": o["x"] + o["w"] / 2, "y": o["y"] + o["h"] / 2}
             return {"x": p["x"] + off["x"] * 1.5, "y": p["y"] + off["y"]}
         b = self.plan["bounds"]  # roamers drift around the active area
-        ph = self.tick_count / 60
+        ph = self.elapsed / 600
         return {"x": b["x"] + b["w"] / 2 + math.cos(ph) * b["w"] * 0.3 + off["x"], "y": b["y"] + b["h"] / 2 + math.sin(ph * 1.3) * b["h"] * 0.3 + off["y"]}
 
     # ---------- simulation ----------
 
-    def tick(self) -> None:
-        self.tick_count += 1
-        now = _now_ms()
+    def start_shift(self) -> None:
+        """A new morning: robots recharged and machines refuelled overnight."""
+        for t in self.truth.values():
+            if t["kind"] in ("robot", "drone", "machine"):
+                t["energy"] = 92 + self.rand() * 8
+            elif t["kind"] == "worker":
+                t["energy"] = 85 + self.rand() * 15
+
+    def tick(self, dt: float = 1.0) -> None:
+        self._dt = dt
+        self.elapsed += dt
+        now = self.now_ms()
         self._update_relays(now)
         self._compute_network()
         for t in self.truth.values():
@@ -358,23 +403,23 @@ class SimulatedSite:
 
     def _update_relays(self, now: int) -> None:
         # Scripted demo: 40 s in, the relay RPD-1 is using fails. Redundant coverage should carry it.
-        if self.tick_count == 40:
+        if self.elapsed - self._dt < 40 <= self.elapsed:
             rep = self.reported.get("RPD-1")
             via = rep and rep.get("via")
             relay = self.truth.get(via) if via and via != "GW" else next((t for t in self.truth.values() if t["kind"] == "relay" and t["id"] != "GW"), None)
             if relay:
-                self._fail_relay(relay, now, 50)
+                self._fail_relay(relay, now, 180)
         for t in self.truth.values():
             if t["kind"] != "relay" or t["id"] == "GW":
                 continue
-            if not t["failedUntil"] and self.tick_count > 120 and self.rand() < 0.0006:
-                self._fail_relay(t, now, 40 + self.rand() * 40)
+            if not t["failedUntil"] and self.elapsed > 120 and self.rand() < _chance(1 / (5 * self.rates.shift), self._dt):
+                self._fail_relay(t, now, 300 + self.rand() * 900)  # about one outage per relay every five shifts
             if t["failedUntil"] and now >= t["failedUntil"]:
                 t["failedUntil"] = None
                 t["mode"] = "autonomous"
                 t["task"] = "Relaying"
                 self.log("info", f"{t['name']} is back online. Mesh routes restored.", t["id"])
-            t["energy"] = max(5, min(100, t["energy"] + (self.rand() - 0.52) * 0.4))
+            t["energy"] = max(5, min(100, t["energy"] + (self.rand() - 0.5) * 0.02 * self._dt))
 
     def _fail_relay(self, t: dict, now: int, seconds: float) -> None:
         if t["failedUntil"]:
@@ -390,9 +435,9 @@ class SimulatedSite:
             if m:
                 t["x"], t["y"] = m["x"], m["y"]
             return
-        if t["mode"] == "paused" or self.tick_count < t["holdUntil"]:
+        if t["mode"] == "paused" or self.elapsed < t["holdUntil"]:
             return
-        t["energy"] = max(8, t["energy"] - (0.01 if t["kind"] == "worker" else 0.03))
+        t["energy"] = max(8, t["energy"] - (self.rates.drain_tag if t["kind"] == "worker" else self.rates.drain_machine) * self._dt)
         # A crane or trencher answering a request drives there (in _update_requests) instead of its usual work.
         if t["requestId"] and t["role"] != "Telehandler":
             return
@@ -408,25 +453,26 @@ class SimulatedSite:
         elif t["kind"] == "worker":
             self._step_worker(t)
 
-    @staticmethod
-    def _move_toward(t: dict, tx: float, ty: float) -> bool:
+    def _move_toward(self, t: dict, tx: float, ty: float) -> bool:
+        """Move up to speed × dt toward a point; True once there."""
         d = dist(t["x"], t["y"], tx, ty)
         if d < 0.5:
             return True
         t["heading"] = math.degrees(math.atan2(ty - t["y"], tx - t["x"]))
-        step = min(d, t["speed"])
+        reach = t["speed"] * self._dt
+        step = min(d, reach)
         t["x"] += (tx - t["x"]) / d * step
         t["y"] += (ty - t["y"]) / d * step
-        return d <= t["speed"]
+        return d <= reach
 
     def _claimed(self, role: str, me: dict) -> set[str]:
         return {o["workUnit"] for o in self.truth.values() if o is not me and o["role"] == role and o["workUnit"]}
 
     # Unit status each kind of row task needs before it can work a unit, and what it leaves behind.
     WORK = {
-        "stake": {"needs": ("planned",), "sets": "staked", "dwell": 1, "doing": "Staking"},
-        "pile": {"needs": ("staked", "planned"), "sets": "piled", "dwell": 3, "doing": "Driving piles at"},
-        "check": {"needs": None, "sets": None, "dwell": 1, "doing": "Checking piles at"},
+        "stake": {"needs": ("planned",), "sets": "staked", "dwell": "stake_unit", "doing": "Staking"},
+        "pile": {"needs": ("staked", "planned"), "sets": "piled", "dwell": "pile_unit", "doing": "Driving piles at"},
+        "check": {"needs": None, "sets": None, "dwell": "check_unit", "doing": "Checking piles at"},
     }
 
     def _step_robot(self, t: dict, now: int) -> None:
@@ -458,8 +504,8 @@ class SimulatedSite:
         unit = self.unit_by_id[a["units"][a["done"]]]
         if self._move_toward(t, unit["x"], unit["y"] + 7):
             t["task"] = f"{a['label']}: {work['doing'].lower()} {unit['id']} ({a['done'] + 1} of {len(a['units'])})"
-            t["dwell"] += 1
-            if t["dwell"] >= work["dwell"]:
+            t["dwell"] += self._dt
+            if t["dwell"] >= getattr(self.rates, work["dwell"]):
                 if work["sets"]:
                     unit["status"] = work["sets"]
                     t["outbox"].append({"unitId": unit["id"], "status": work["sets"], "at": now})
@@ -500,8 +546,8 @@ class SimulatedSite:
         t["mode"] = "manual"
         if self._move_toward(t, unit["x"], unit["y"] + 14):
             t["task"] = f"Setting P3 unit {unit['id']}"
-            t["dwell"] += 1
-            if t["dwell"] >= 5:
+            t["dwell"] += self._dt
+            if t["dwell"] >= self.rates.crane_unit:
                 unit["status"] = "installed"
                 self.last_installed = {"x": unit["x"], "y": unit["y"]}
                 t["outbox"].append({"unitId": unit["id"], "status": "installed", "at": now})
@@ -527,8 +573,8 @@ class SimulatedSite:
         t["mode"] = "manual"
         if self._move_toward(t, dest["x"], dest["y"]):
             t["task"] = f"Handing unit to {crane['name']}" if to_crane else "Loading unit at laydown yard"
-            t["dwell"] += 1
-            if t["dwell"] >= 3:
+            t["dwell"] += self._dt
+            if t["dwell"] >= (self.rates.th_handoff if to_crane else self.rates.th_load):
                 t["shuttleLeg"] = "laydown" if to_crane else "crane"
                 t["dwell"] = 0
         else:
@@ -543,7 +589,7 @@ class SimulatedSite:
     def _step_worker(self, t: dict) -> None:
         anchor = self._anchor_for(t["group"], t["anchorOffset"])
         tg = t["target"]
-        if not tg or dist(t["x"], t["y"], tg["x"], tg["y"]) < 2 or self.rand() < 0.05:
+        if not tg or dist(t["x"], t["y"], tg["x"], tg["y"]) < 2 or self.rand() < _chance(0.05, self._dt):
             r = 3 + self.rand() * 10
             a = self.rand() * math.pi * 2
             t["target"] = {"x": anchor["x"] + math.cos(a) * r, "y": anchor["y"] + math.sin(a) * r}
@@ -558,10 +604,10 @@ class SimulatedSite:
                 if dist(m["x"], m["y"], w["x"], w["y"]) > PROXIMITY_STOP_M:
                     continue
                 key = f"{m['id']}:{w['id']}"
-                if self.proximity_cooldown.get(key, 0) > self.tick_count:
+                if self.proximity_cooldown.get(key, 0) > self.elapsed:
                     continue
-                self.proximity_cooldown[key] = self.tick_count + 120
-                m["holdUntil"] = self.tick_count + 3
+                self.proximity_cooldown[key] = self.elapsed + PROXIMITY_COOLDOWN_S
+                m["holdUntil"] = self.elapsed + PROXIMITY_HOLD_S
                 m["outEvents"].append({"level": "warn", "text": f"Proximity stop: {m['name']} held for {w['name']} ({w['role']}).", "at": now})
 
     # ---------- requests ----------
@@ -617,14 +663,14 @@ class SimulatedSite:
                 req["status"] = "en-route"
             if req["status"] == "en-route":
                 req["eta"] = round(d / t["speed"])
-                if d < 2:
+                if d < max(2, t["speed"] * self._dt):
                     req["status"] = "arrived"
                     t["task"] = f"{req['id']}: on station at {req['target']['label']}"
                     t["dwell"] = 0
                     self.log("info", f"{t['name']} arrived at {req['target']['label']} for {req['id']}.", t["id"])
             elif req["status"] == "arrived":
-                t["dwell"] += 1
-                if t["dwell"] >= 15:
+                t["dwell"] += self._dt
+                if t["dwell"] >= REQUEST_ON_STATION_S:
                     req["status"] = "done"
                     self._release_from_request(t)
                     self.log("info", f"{req['id']} done. {t['name']} is available again.", t["id"])
@@ -713,7 +759,7 @@ class SimulatedSite:
 
     def _force_report(self, t: dict) -> None:
         rep = self.reported.get(t["id"])
-        self._report(t, _now_ms(), "lora" if t["kind"] == "worker" else "mesh", rep and rep.get("via"))
+        self._report(t, self.now_ms(), "lora" if t["kind"] == "worker" else "mesh", rep and rep.get("via"))
 
     def _report(self, t: dict, now: int, link: str, via: str | None = None) -> None:
         self.reported[t["id"]] = {
@@ -749,24 +795,29 @@ class SimulatedSite:
         t["outEvents"] = []
 
     def _update_uplink(self, now: int) -> None:
-        if self.tick_count % 50 == 0:
+        if self.elapsed >= self._next_uplink_check:  # the satellite link drops now and then
+            self._next_uplink_check = self.elapsed + 1800
             self.uplink["online"] = self.rand() > 0.35
             if not self.uplink["online"]:
                 self.log("info", "Satellite uplink is down. Site keeps running; HQ sync will resume when it returns.")
-        if self.uplink["online"] and self.tick_count % 30 == 0:
+        if self.uplink["online"]:
             self.uplink["lastSync"] = now
 
     # ---------- events & snapshot ----------
 
     def log(self, level: str, text: str, asset_id: str | None = None, at: int | None = None) -> None:
-        self.events.insert(0, {"id": self._event_seq, "at": at or _now_ms(), "level": level, "text": text, "assetId": asset_id})
+        for key, hit in (("relayOutages", "stopped sending heartbeats" in text), ("refusals", "refusal at" in text),
+                         ("proximityStops", text.startswith("Proximity stop")), ("cancelledAttempts", "attempt cancelled" in text)):
+            if hit:
+                self.counters[key] += 1
+        self.events.insert(0, {"id": self._event_seq, "at": at or self.now_ms(), "level": level, "text": text, "assetId": asset_id})
         self._event_seq += 1
         del self.events[250:]
 
     def snapshot(self) -> dict:
         t = self.plan["terrain"]
         return {
-            "now": _now_ms(),
+            "now": self.now_ms(),
             "siteName": SITE_NAME,
             "site": {"w": t["cols"] * t["cellM"], "h": t["rows"] * t["cellM"]},
             "view": dict(self.plan["bounds"]),

@@ -6,7 +6,8 @@ import { Topbar } from './Topbar'
 import type { Stage } from './Topbar'
 import type { SurveySnapshot } from '../survey/types'
 import { phaseLabel } from '../survey/labels'
-import { edge, useAgentSelection } from '../edge/client'
+import { edge, useAgentSelection, useEdge } from '../edge/client'
+import { TimeDial } from './TimeDial'
 import type { AgentState, ChatMessage } from '../edge/client'
 
 interface Props {
@@ -19,6 +20,7 @@ interface Props {
 
 /** Survey stage: drones build the terrain model of a new site from scratch. */
 export function SurveyView({ snapshot: s, chat, agent, siteStage, onStage }: Props) {
+  const clock = useEdge().clock
   const [expanded, setExpanded] = useState(false)
   const [selectedDrone, setSelectedDrone] = useState<string>()
   useAgentSelection(chat, (id) => s.drones.some((d) => d.id === id) && setSelectedDrone(id))
@@ -63,6 +65,7 @@ export function SurveyView({ snapshot: s, chat, agent, siteStage, onStage }: Pro
             onLock={() => void edge.act('survey.lock')}
             onOpenBuildup={() => onStage('buildup')}
           />
+          {clock && (s.phase === 'scouting' || s.phase === 'surveying') && <TimeDial clock={clock} mode="survey" act={edge.act} />}
           {s.phase !== 'idle' && (
             <button type="button" className="btn btn--expand" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>
               {expanded ? 'Collapse twin' : 'Expand twin'}

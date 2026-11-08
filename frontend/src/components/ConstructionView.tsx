@@ -5,10 +5,11 @@ import type { Tab } from './StatePanel'
 import { MeshLinks, PacketLayer } from './MeshLayer'
 import { AllocationStrip, PacketKey } from './MeshPanels'
 import type { PacketType } from '../mesh/types'
+import { TimeDial } from './TimeDial'
 import { CommandConsole } from './CommandConsole'
 import { Topbar } from './Topbar'
 import type { Stage } from './Topbar'
-import { ageSeconds, formatAge } from '../twin/freshness'
+import { ageSeconds, formatAge, freshness, setFreshnessSlack } from '../twin/freshness'
 import type { TwinSnapshot } from '../twin/types'
 import { edge, useAgentSelection } from '../edge/client'
 import type { AgentState, ChatMessage } from '../edge/client'
@@ -34,6 +35,11 @@ export function ConstructionView({ snapshot: live, terrainImage, coverageM, chat
   const [packets, setPackets] = useState(true)
   const [heartbeats, setHeartbeats] = useState(false)
   const mesh = live.mesh
+  const siteClock = live.clock
+  // Snapshots arrive every ~0.5 s and the sim steps up to 10 site seconds at a time: stretch
+  // "last heard" thresholds to match, so nothing looks stale just because time is fast.
+  setFreshnessSlack(siteClock ? Math.min(600, siteClock.effectiveSpeed * 0.6 + (siteClock.effectiveSpeed > 1 ? 10 : 0)) : 0)
+  const packetsVisible = !siteClock || (siteClock.effectiveSpeed > 0 && siteClock.effectiveSpeed <= siteClock.packetsMaxSpeed)
   const packetTypes = useMemo(
     () => new Set<PacketType>(packets ? (['TASK_ANNOUNCE', 'BID', 'AGREE', 'COMMIT', 'STATUS', ...(heartbeats ? ['HEARTBEAT' as const] : [])] as PacketType[]) : []),
     [packets, heartbeats],
@@ -75,8 +81,8 @@ export function ConstructionView({ snapshot: live, terrainImage, coverageM, chat
   }, [])
 
   const relays = snapshot.assets.filter((a) => a.kind === 'relay')
-  const relaysUp = relays.filter((r) => r.mode !== 'offline' && ageSeconds(r.lastHeard, snapshot.now) < 10).length
-  const clock = new Date(snapshot.now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const relaysUp = relays.filter((r) => r.mode !== 'offline' && freshness(r.lastHeard, snapshot.now) === 'live').length
+  const clock = siteClock ? `Day ${siteClock.day} · ${siteClock.time}` : new Date(snapshot.now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
   return (
     <div className={`app ${expanded ? 'app--expanded' : ''}`}>
@@ -123,9 +129,10 @@ export function ConstructionView({ snapshot: live, terrainImage, coverageM, chat
                   )
                 : undefined
             }
-            meshOver={mesh && packets ? (k) => <PacketLayer mesh={mesh} types={packetTypes} k={k} taskId={selectedTask} /> : undefined}
+            meshOver={mesh && packets && packetsVisible ? (k) => <PacketLayer mesh={mesh} types={packetTypes} k={k} taskId={selectedTask} /> : undefined}
             keyExtra={mesh ? <PacketKey types={packetTypes} /> : undefined}
           >
+            {siteClock && <TimeDial clock={siteClock} mode="construction" act={edge.act} />}
             {mesh && (
               <AllocationStrip mesh={mesh} onOpenTask={openTask} packets={packets} setPackets={setPackets} showHeartbeats={heartbeats} setShowHeartbeats={setHeartbeats} />
             )}

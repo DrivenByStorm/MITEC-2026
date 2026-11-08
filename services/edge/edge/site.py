@@ -12,11 +12,14 @@ The agent itself can only read state and propose actions.
 from __future__ import annotations
 
 import base64
+import time
 
 import numpy as np
 
 from .buildup.assumptions import ASSUMPTIONS
 from .buildup.planner import PlannerContext, plan_site
+from .clock import SURVEY_SPEEDS, SiteClock
+from .schedule import DayTracker
 from .survey.selection import SelectionAlgorithm, load_selection
 from .survey.session import SurveySession
 from .mesh.site_mesh import SiteMesh
@@ -52,6 +55,10 @@ ACTIONS: dict[str, tuple[str, str, dict]] = {
     "mesh.hub": ("construction", "Switch the hub (edge server's mesh radio) off or on. Robots keep agreeing on tasks they already have.", {"online": "boolean"}),
     "mesh.latency": ("construction", "Set the mesh delivery delay per hop, in milliseconds.", {"ms": "number"}),
     "mesh.loss": ("construction", "Set packet loss per radio hop, in percent.", {"pct": "number"}),
+    "sim.speed": ("any", "Set the simulation speed (1, 10, 60, 300 or 900 times real time; the survey runs at most 20×).", {"x": "number"}),
+    "sim.pause": ("any", "Pause or resume the simulation.", {"paused": "boolean"}),
+    "sim.skipShift": ("construction", "Fast-forward to the end of today's shift (work still happens, just quickly).", {}),
+    "sim.pauseAtDayEnd": ("construction", "Pause automatically when each shift ends, so the day can be reviewed.", {"on": "boolean"}),
 }
 
 STAGES = ("survey", "buildup", "construction")
@@ -64,7 +71,11 @@ class Site:
         self.preview: dict | None = None
         self.sim: SimulatedSite | None = None
         self.mesh: SiteMesh | None = None
+        self.days: DayTracker | None = None
+        self.clock = SiteClock()
         self.plan_version = 0
+        self.shift_started_ms = 0
+        self._survey_carry = 0.0
 
     # ---------- state ----------
 
@@ -87,6 +98,8 @@ class Site:
         return [name for name, (stage, _, _) in ACTIONS.items() if self._action_allowed(name, stage)]
 
     def _action_allowed(self, name: str, stage: str) -> bool:
+        if stage == "any":
+            return True
         if stage == "survey":
             return self.stage == "survey"
         if stage == "buildup":
@@ -120,6 +133,10 @@ class Site:
             "mesh.hub": lambda: f"Switch the hub {'on' if _truthy(a.get('online')) else 'off'}",
             "mesh.latency": lambda: f"Set mesh delay to {a.get('ms')} ms per hop",
             "mesh.loss": lambda: f"Set packet loss to {a.get('pct')}%",
+            "sim.speed": lambda: f"Set simulation speed to {a.get('x')}×",
+            "sim.pause": lambda: "Pause the simulation" if _truthy(a.get("paused")) else "Resume the simulation",
+            "sim.skipShift": lambda: "Skip to the end of today's shift",
+            "sim.pauseAtDayEnd": lambda: f"{'Pause' if _truthy(a.get('on')) else 'Keep running'} at the end of each day",
         }
         return labels.get(name, lambda: name)()
 
@@ -148,6 +165,9 @@ class Site:
             "mesh.hub": ["online"],
             "mesh.latency": ["ms"],
             "mesh.loss": ["pct"],
+            "sim.speed": ["x"],
+            "sim.pause": ["paused"],
+            "sim.pauseAtDayEnd": ["on"],
         }.get(name, [])
         missing = [k for k in required if a.get(k) in (None, "", [])]
         if missing:
@@ -179,6 +199,23 @@ class Site:
             return self._generate_plan(int(a["unitCount"]), int(a["crewSize"]))
         if name == "plan.approve":
             return self._approve()
+        c = self.clock
+        if name == "sim.speed":
+            x = float(a["x"])
+            if self.stage == "survey" and x > max(SURVEY_SPEEDS):
+                c.set_speed(x)
+                return f"Speed set to {x:g}×; the survey runs at most {max(SURVEY_SPEEDS)}×."
+            return c.set_speed(x)
+        if name == "sim.pause":
+            return c.set_paused(_truthy(a["paused"]))
+        if name == "sim.pauseAtDayEnd":
+            c.pause_at_day_end = _truthy(a["on"])
+            return "Will pause at the end of each shift." if c.pause_at_day_end else "Won't pause at the end of each shift."
+        if name == "sim.skipShift":
+            if c.turbo_until is not None:
+                return "Already skipping to the end of the shift."
+            c.skip_to_shift_end()
+            return f"Fast-forwarding through the rest of day {c.day} ({round(c.left_in_shift() / 60)} site minutes of work)."
         sim = self.sim
         assert sim is not None
         if name == "twin.pause":
@@ -236,8 +273,11 @@ class Site:
     def _approve(self) -> str:
         if not self.plan:
             raise ActionError("Generate a plan first.")
-        self.sim = SimulatedSite(self.plan)
+        self.clock = SiteClock(shift_minutes=self.plan["assumptions"]["shiftMinutes"])  # Day 1, 07:00, 1x
+        self.shift_started_ms = self.clock.ms()
+        self.sim = SimulatedSite(self.plan, now_ms=self.clock.ms)
         self.mesh = SiteMesh(self.sim)
+        self.days = DayTracker(self.plan, self.sim, self.mesh, self.clock)
         return f"Plan approved. Construction has started on the blank site: {len(self.plan['units'])} units, crew of {self.plan['crewUsed']}."
 
     # ---------- simulation ----------
@@ -245,13 +285,69 @@ class Site:
     def tick_survey(self) -> None:
         self.survey.tick()
 
-    def tick_twin(self) -> None:
-        if self.sim:
-            self.sim.tick()
+    def survey_ticks(self, base: int = 1) -> int:
+        """How many survey ticks to run this loop, at the dial speed (capped at 20x)."""
+        c = self.clock
+        if c.paused:
+            return 0
+        self._survey_carry += base * min(c.speed, max(SURVEY_SPEEDS))
+        n = int(self._survey_carry)
+        self._survey_carry -= n
+        return n
 
-    def tick_mesh(self, dt: float) -> None:
-        if self.mesh:
-            self.mesh.step(dt)
+    def now_ms(self) -> int:
+        """Site time during construction, wall time before it."""
+        return self.clock.ms() if self.sim else int(time.time() * 1000)
+
+    def advance(self, wall_dt: float, budget_s: float = 0.06) -> bool:
+        """Run construction for wall_dt at the dial speed. Returns True if a shift ended."""
+        sim, mesh, c = self.sim, self.mesh, self.clock
+        if not (sim and mesh and self.days):
+            return False
+        want = (c.turbo_until - c.t) if c.turbo_until is not None else wall_dt * c.effective_speed()
+        speed = c.effective_speed()
+        mesh.tx.record_traces = speed <= 2
+        chunk_max = min(10.0, max(0.1, speed * 0.1))
+        if c.turbo_until is not None:
+            budget_s *= 2  # skipping: work harder, the manager is waiting
+        start = time.perf_counter()
+        rolled = False
+        while want > 1e-9:
+            if not c.on_shift():
+                self._start_next_shift()
+                continue
+            chunk = min(want, c.left_in_shift(), chunk_max)
+            mesh.step(chunk)
+            sim.tick(chunk)
+            c.t += chunk
+            want -= chunk
+            if c.left_in_shift() <= 1e-6:
+                self._end_shift()
+                rolled = True
+                if c.turbo_until is not None:
+                    c.end_turbo()
+                    break
+                if c.pause_at_day_end:
+                    c.paused = True
+                    break
+            if time.perf_counter() - start > budget_s:
+                break  # can't keep up at this speed: drop the rest rather than fall behind
+        return rolled
+
+    def _end_shift(self) -> None:
+        sim, days = self.sim, self.days
+        days.close_day()
+        rec = days.days[-1]
+        sim.log("info", f"Day {rec['day']} done. {rec['summary']}")
+        self._start_next_shift()
+
+    def _start_next_shift(self) -> None:
+        c = self.clock
+        c.t = c.next_shift_start()
+        self.shift_started_ms = c.ms()
+        self.sim.start_shift()
+        self.days.open_day()
+        self.sim.log("info", f"Day {c.day} starts at {c.hhmm(c.shift_start)}. Robots recharged and machines refuelled overnight.")
 
     def _task_label(self, text) -> str:
         m = self.mesh

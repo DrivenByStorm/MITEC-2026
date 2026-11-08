@@ -1121,3 +1121,82 @@
 .slider { display: grid; gap: 2px; margin-bottom: 8px; font-size: 0.92rem; }
 .slider input { accent-color: var(--teal); width: 100%; }
 .chip--down { border-color: var(--alert); color: var(--alert); }
+
+/* ---------- Time dial ---------- */
+.time-dial {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-family: var(--font-data);
+  font-size: 0.9rem;
+  z-index: 2;
+  max-width: calc(100% - 20px);
+}
+.time-dial--survey { top: auto; bottom: 54px; }
+.time-dial__clock { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.time-dial__clock strong { font-size: 1rem; }
+.time-dial__time { font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.time-dial__shift { color: var(--slate); font-size: 0.85rem; }
+.time-dial__controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.time-dial__play {
+  width: 32px;
+  height: 28px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.time-dial__play:hover { border-color: var(--basalt); }
+.seg--dial { margin: 0; }
+.seg--dial .seg__btn { padding: 3px 9px; font-variant-numeric: tabular-nums; }
+.seg__btn:disabled { opacity: 0.5; cursor: default; }
+.time-dial__skip { height: 28px; padding: 0 10px; font-size: 0.85rem; }
+.time-dial__opt { display: flex; align-items: center; gap: 5px; font-size: 0.82rem; color: var(--slate); cursor: pointer; }
+.time-dial__opt input { margin: 0; accent-color: var(--teal); }
+.time-dial__note { margin: 0; font-size: 0.8rem; color: var(--slate); }
+
+/* ---------- Days tab ---------- */
+.days section { margin-bottom: 14px; }
+.days__headline { margin: 0 0 6px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
+.days__delta { font-family: var(--font-data); font-size: 0.9rem; color: var(--ok); }
+.days__delta.is-behind { color: var(--alert); }
+.days__live { margin-left: 6px; font-family: var(--font-data); font-size: 0.75rem; color: var(--slate); font-weight: 500; }
+.table--days tbody tr { cursor: default; }
+.table--days tbody tr.is-live { background: #fff; }
+.table--days td, .table--days th { font-variant-numeric: tabular-nums; }
+.day-log { margin: 0; padding-left: 18px; font-size: 0.9rem; display: grid; gap: 6px; }
+.days-chart { position: relative; margin: 0; }
+.days-chart__legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 4px; padding: 0; list-style: none; font-family: var(--font-data); font-size: 0.85rem; color: var(--slate); }
+.days-chart__legend li { display: flex; align-items: center; gap: 4px; }
+.days-chart__key-style { color: var(--slate); }
+.days-chart__svg { display: block; width: 100%; height: auto; }
+.days-chart__grid { stroke: #e3e8e9; stroke-width: 1; }
+.days-chart__tick { font-family: var(--font-data); font-size: 11px; fill: var(--slate); }
+.days-chart__end { font-family: var(--font-data); font-size: 11.5px; font-weight: 600; fill: var(--basalt); }
+.days-chart__cross { stroke: var(--slate); stroke-width: 1; }
+.days-chart__tip {
+  position: absolute;
+  top: 26px;
+  transform: translateX(-50%);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-family: var(--font-data);
+  font-size: 0.82rem;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.08);
+}
+.days-chart__tip-day { color: var(--slate); margin-bottom: 2px; }
+.days-chart__tip-row { display: flex; align-items: center; gap: 6px; }
+.days-chart__tip-row span { color: var(--slate); }

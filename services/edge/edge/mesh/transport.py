@@ -67,6 +67,8 @@ class MeshTransport:
         self._trace_seq = itertools.count(1)
         self._msg_seq: dict[str, itertools.count] = {}
         self.new_traces: list[dict] = []
+        self.record_traces = True  # off at high speed: nobody can watch packets then
+        self._adj: dict[str, list[tuple[Node, str]]] | None = None  # link table, rebuilt each step
         self.stats = {"sent": 0, "hops": 0, "delivered": 0, "lost": 0, "broken": 0, "duplicates": 0}
 
     # ---------- nodes and links ----------
@@ -92,24 +94,36 @@ class MeshTransport:
             return "radio" if d <= ASSET_RANGE_M else None
         return "radio" if d <= RELAY_RANGE_M else None
 
+    def invalidate(self) -> None:
+        """Positions, node states or cuts changed: rebuild the link table on next use."""
+        self._adj = None
+
+    def _table(self) -> dict[str, list[tuple[Node, str]]]:
+        if self._adj is None:
+            adj: dict[str, list[tuple[Node, str]]] = {i: [] for i in self.nodes}
+            ns = list(self.nodes.values())
+            for i, a in enumerate(ns):
+                for b in ns[i + 1:]:
+                    k = self.link_kind(a, b)
+                    if k:
+                        adj[a.id].append((b, k))
+                        adj[b.id].append((a, k))
+            self._adj = adj
+        return self._adj
+
     def neighbors(self, node_id: str) -> list[tuple[Node, str]]:
-        me = self.nodes[node_id]
-        out = []
-        for n in self.nodes.values():
-            k = self.link_kind(me, n)
-            if k:
-                out.append((n, k))
-        return out
+        return self._table().get(node_id, [])
+
+    def linked(self, a: str, b: str) -> bool:
+        return any(n.id == b for n, _ in self.neighbors(a))
 
     def links(self) -> list[dict]:
-        ids = sorted(self.nodes)
         out = []
-        for i, a in enumerate(ids):
-            for b in ids[i + 1:]:
-                k = self.link_kind(self.nodes[a], self.nodes[b])
-                if k:
-                    out.append({"a": a, "b": b, "kind": k})
-        return out
+        for a, lst in self._table().items():
+            for n, k in lst:
+                if a < n.id:
+                    out.append({"a": a, "b": n.id, "kind": k})
+        return sorted(out, key=lambda l: (l["a"], l["b"]))
 
     def reachable(self, start: str) -> set[str]:
         """Nodes with a path to `start` over current links (for display and tests only)."""
@@ -180,7 +194,8 @@ class MeshTransport:
                 "result": "lost" if lost else "ok",
             }
             self.stats["hops"] += 1
-            self.new_traces.append(tr)
+            if self.record_traces:
+                self.new_traces.append(tr)
             if lost:
                 self.stats["lost"] += 1
                 continue
@@ -189,6 +204,7 @@ class MeshTransport:
     # ---------- time ----------
 
     def advance(self, dt: float) -> None:
+        self._adj = None  # things may have moved since the last step
         end = self.now + dt
         while self._queue and self._queue[0].at <= end:
             dv = heapq.heappop(self._queue)
@@ -200,10 +216,11 @@ class MeshTransport:
 
     def _deliver(self, dv: _Delivery) -> None:
         to, frm = self.nodes.get(dv.to), self.nodes.get(dv.frm)
-        if not to or not frm or not self.link_kind(frm, to):
+        if not to or not frm or not self.linked(frm.id, to.id):
             dv.trace["result"] = "broken"
             self.stats["broken"] += 1
-            self.new_traces.append({**dv.trace, "update": True})  # same id: the UI turns that dot red
+            if self.record_traces:
+                self.new_traces.append({**dv.trace, "update": True})  # same id: the UI turns that dot red
             return
         pkt = dv.packet
         mid = pkt["message_id"]
@@ -231,10 +248,12 @@ class MeshTransport:
 
     def cut_link(self, a: str, b: str) -> None:
         self.cut.add(_pair(a, b))
+        self._adj = None
 
     def restore_link(self, a: str, b: str) -> bool:
         p = _pair(a, b)
         if p in self.cut:
             self.cut.discard(p)
+            self._adj = None
             return True
         return False

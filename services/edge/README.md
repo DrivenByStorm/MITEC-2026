@@ -26,6 +26,20 @@ With no API key the twin still runs and the map buttons still work; the chat jus
 
 Settings (in `.env`): `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `AGENT_PROACTIVE=0` to stop unprompted messages, `AGENT_MIN_INTERVAL_S` (default 20) between unprompted messages, `SELECTION_ALGORITHM` (below), `EDGE_HOST`, `EDGE_PORT`.
 
+## Site time and the speed dial (`edge/clock.py`, `edge/schedule.py`)
+
+Construction runs at the plan's **real rates**, from `buildup/assumptions.py`:
+- a pile-driving robot takes 8 piles ÷ 300 piles a day = 16 minutes per unit
+- a crane sets a unit in 37.5 minutes
+- a rover stakes 120 units and checks 200 units a shift
+- telehandler loads and handoffs, trencher metres per day and travel speeds follow the plan too
+
+Work happens inside a shift (07:00 to 17:00 with the default 600-minute shift). When a shift ends, the day is summarized, the clock jumps to 07:00 the next day, and robots and machines start recharged. Day 1 starts at 07:00 the morning the plan is approved. Site times go to the UI as UTC epoch ms on a fixed calendar (Day 1 = 9 Nov 2026), and the UI formats them in UTC.
+
+The dial (`sim.speed`) runs construction at 1×, 10×, 60×, 300× or 900× real time; the survey runs at up to 20×. `sim.pause` pauses. `sim.skipShift` fast-forwards through the rest of the shift as fast as the machine allows; the work still happens. `sim.pauseAtDayEnd` stops at each shift end. At high speed the simulator takes steps of up to 10 site seconds and the mesh up to 20 steps per call; a 10-hour shift simulates in about 15 s of CPU. Packets are only recorded and streamed at 2× or slower.
+
+The **day tracker** (`schedule.py`) counts units staked, piled and set each shift from the twin's *reported* statuses, against the plan's pace: staking at the rovers' rate, piling over the planner's piling days, and setting a day behind piling. It also counts tasks done, rounds, stalled rounds, relay outages and pile refusals, and writes a one-line summary when the shift ends, which the agent can pass on.
+
 ## Site mesh (`edge/mesh/`)
 
 Follows "Exowatt Mesh Network and Digital Twin" (8 Nov 2026): the twin shows robots passing task information to each other over the mesh and converging on one owner. The bidding is an **emulation**, not the CBAA firmware.
@@ -49,7 +63,7 @@ Scores and timers are in `rules.py` (`ALLOC`); ranges in `twin/network.py`; the 
 
 ## How the agent works
 
-- **Tools (read-only):** site overview, survey status, the plan, find an asset, list assets with filters (stale, offline, paused...), network status, recent events, equipment requests, mesh tasks, one allocation round in detail, and mesh status.
+- **Tools (read-only):** site overview, survey status, the plan, find an asset, list assets with filters (stale, offline, paused...), network status, recent events, equipment requests, mesh tasks, one allocation round in detail, mesh status, and day-by-day progress against the plan.
 - **Role on the mesh:** a hub-side helper. It can suggest cancelling, releasing or reprioritising a task, cutting or restoring links, relays and the hub, or changing delay and loss. It never picks a winner.
 - **`propose_action`:** the only way it can change anything. The proposal becomes a card in the chat; approving it runs the same action a UI button would, and the result goes back to the agent. Proposals for an earlier stage expire when the site moves on.
 - **Monitoring:** after every tick the monitor collects findings (including stalled agreement, uncertain owners and cancelled attempts on the mesh). At most every `AGENT_MIN_INTERVAL_S` it hands them to the agent as `[Site monitor] ...`. The agent either replies `NO_UPDATE` (nothing is shown) or posts a short heads-up, usually with a suggestion.
@@ -69,7 +83,7 @@ Every action, whether from a button or an approved suggestion, goes through `Sit
 
 ## WebSocket protocol (`/ws`)
 
-Server → client: `hello` (terrain heights, network ranges, stage, plan, chat, agent), `survey` (snapshot plus packed coverage bits when new ground is mapped), `twin` (with `mesh`: nodes, links, tasks, rounds, robot views), `traces` (packet hops for the animation, 5 times a second), `plan` (plan plus preview), `stage`, `chat` (one message, new or updated), `agent` (online/busy/activity), `result` (reply to an action).
+Server → client: `hello` (terrain heights, network ranges, stage, plan, chat, agent), `survey` (snapshot plus packed coverage bits when new ground is mapped), `twin` (with `mesh`: nodes, links, tasks, rounds, robot views; `clock`; `schedule`: days against the plan), `traces` (packet hops for the animation, 5 times a second), `plan` (plan plus preview), `stage`, `chat` (one message, new or updated), `agent` (online/busy/activity), `result` (reply to an action).
 
 Client → server: `action {id, name, args}`, `chat {text}`, `decide {suggestionId, approve}`.
 
@@ -77,7 +91,9 @@ Client → server: `action {id, name, args}`, `chat {text}`, `decide {suggestion
 
 ```
 edge/
-  server.py      FastAPI app: WebSocket, tick loops, chat, suggestions
+  server.py      FastAPI app: WebSocket, survey + construction loops, chat, suggestions
+  clock.py       site time, shifts and the speed dial
+  schedule.py    day-by-day tracker against the plan
   site.py        stages + every action (the one place site state changes)
   agent.py       Claude site agent: tools, propose_action, history
   monitor.py     rules that decide what's worth the agent's attention
