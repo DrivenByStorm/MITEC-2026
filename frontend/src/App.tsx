@@ -40,15 +40,15 @@ export default function App() {
   const banner = st.connection !== 'open' && <div className="conn-banner" role="status">Lost the connection to the edge service. Reconnecting…</div>
   const common = { chat: st.chat, agent: st.agent, onStage: goTo, siteStage: st.stage }
 
-  if (view === 'construction' && st.twin) {
+  if (view === 'construction' && st.twin && st.meshConfig && st.plan) {
     return (
       <>
         {banner}
-        <ConstructionView snapshot={st.twin} terrainImage={terrainImage} coverageM={st.network.assetRangeM} {...common} />
+        <ConstructionView twin={st.twin} config={st.meshConfig} plan={st.plan} events={st.meshEvents} simLog={st.meshLog} terrainImage={terrainImage} {...common} />
       </>
     )
   }
-  if (view === 'buildup' || (view === 'construction' && !st.twin)) {
+  if (view === 'buildup' || view === 'construction') {
     return (
       <>
         {banner}

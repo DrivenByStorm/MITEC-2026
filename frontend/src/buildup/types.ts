@@ -45,7 +45,7 @@ export interface PlannedRelay {
 export type FleetKind = 'robot' | 'machine' | 'drone' | 'network' | 'wearable'
 
 export interface FleetItem {
-  key: 'pile' | 'crane' | 'telehandler' | 'trencher' | 'drone' | 'relay' | 'loraGateway' | 'tag'
+  key: 'pile' | 'crane' | 'telehandler' | 'trencher' | 'surveyBot' | 'relay' | 'gateway' | 'anchor' | 'badge' | 'tablet'
   name: string
   kind: FleetKind
   count: number
@@ -73,6 +73,10 @@ export interface SitePlan {
   blocks: PlannedBlock[]
   relays: PlannedRelay[]
   gateway: Pt
+  /** Primary and backup gateways, both wired to the hub. */
+  gateways: Pt[]
+  /** UWB anchor posts (masts carry anchors too). */
+  anchors: { id: string; x: number; y: number }[]
   office: Rect
   laydown: Rect
   trenchM: number

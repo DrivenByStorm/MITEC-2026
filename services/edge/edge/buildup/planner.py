@@ -3,8 +3,9 @@
 Given the surveyed terrain, the number of P3 units and the crew available, it decides:
   1. WHERE units go: rows on mapped ground flat enough to build on, grouped into blocks,
      packed as close to the site office as the terrain allows;
-  2. HOW MANY RELAYS and where: every unit within machine-link range of at least two relays
-     (so one failure never cuts a work area off), all chained to the gateway;
+  2. HOW MANY RELAYS and where: every unit within coverage of at least two relays (so one
+     failure never cuts a work area off), all chained to one of the two gateways; and how many
+     UWB anchor posts, so every work area has three anchors in range for crew positions;
   3. WHAT FLEET and CREW: starts with one crew of each kind, then keeps adding to whichever
      stage is the schedule bottleneck while people remain;
   4. HOW LONG it should take, and what limits it.
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..twin.network import ASSET_RANGE_M, RELAY_RANGE_M
+from ..twin.network import COVERAGE_RADIUS_M, RELAY_RANGE_M, UWB_RANGE_M
 from .assumptions import ASSUMPTIONS
 
 UNIT_HALF_W = 6  # P3 footprint used for layout, meters (12 x 8)
@@ -169,11 +170,16 @@ def plan_site(unit_count: float, crew_size: float, ctx: PlannerContext, A: dict 
         trench_m += abs(b["x"] + b["w"] / 2 - office["x"]) + abs(b["y"] + b["h"] / 2 - office["y"])  # feeder
     mean_haul_m = (sum(math.hypot(u["x"] - hub["x"], u["y"] - hub["y"]) for u in units) / len(units)) * 1.2 if units else 0.0
 
-    # ---------- relays ----------
-    gateway = {"x": office["x"] + 20, "y": office["y"] + 20}
-    relays, uncovered = _plan_relays(units, [_center(office), _center(laydown)], gateway, ctx, nw, se)
+    # ---------- relays, gateways and UWB anchors ----------
+    # Two gateways on the site office, both wired to the hub (spec 3, 5.5).
+    gateways = [{"x": office["x"] + 20, "y": office["y"] + 20}, {"x": office["x"] + office["w"] - 20, "y": office["y"] + 20}]
+    gateway = gateways[0]
+    relays, uncovered = _plan_relays(units, [_center(office), _center(laydown)], gateways, ctx, nw, se)
     if uncovered > 0:
         warnings.append(f"{uncovered} work location(s) could only be covered by one relay; the mapped ground ran out for a second.")
+    anchors, thin = _plan_anchors(units, [_center(laydown)], gateways + [{"x": r["x"], "y": r["y"]} for r in relays], ctx, nw, se)
+    if thin > 0:
+        warnings.append(f"{thin} work location(s) have fewer than 3 UWB anchors in range; crew positions there will be less accurate.")
 
     # ---------- fleet & crew ----------
     fp = _size_fleet(len(units), trench_m, mean_haul_m, crew_size, A)
@@ -190,11 +196,16 @@ def plan_site(unit_count: float, crew_size: float, ctx: PlannerContext, A: dict 
          "why": f"Average haul {round(mean_haul_m)} m from the laydown yard, so each crane needs {th} to keep it fed."},
         {"key": "trencher", "name": "Trencher", "kind": "machine", "count": c["trench"],
          "why": f"{trench_m / 1000:.1f} km of cable trench at {A['trencherMPerDay']} m per trencher per day."},
-        {"key": "drone", "name": "Survey drone", "kind": "drone", "count": 1, "why": "Daily progress surveys; reused from the survey fleet."},
+        {"key": "surveyBot", "name": "Survey bot", "kind": "robot", "count": 1, "why": "As-built checks after each block's piles (supervisor signs off); reused from the survey fleet."},
         {"key": "relay", "name": "Solar relay mast", "kind": "network", "count": len(relays),
-         "why": f"Every unit within {ASSET_RANGE_M} m of at least {REDUNDANCY} relays; {link_only} extra to chain far relays back to the gateway (hops ≤ {RELAY_RANGE_M} m)."},
-        {"key": "loraGateway", "name": "LoRa gateway", "kind": "network", "count": max(1, math.ceil(len(relays) / 2)), "why": "On every other relay mast, for worker tags."},
-        {"key": "tag", "name": "Worker tag (LoRa + UWB)", "kind": "wearable", "count": fp["crewUsed"], "why": "One per person on site, for position and proximity stops."},
+         "why": f"Every unit within {COVERAGE_RADIUS_M} m of at least {REDUNDANCY} relays or gateways; {link_only} extra to chain far relays back to a gateway (hops ≤ {RELAY_RANGE_M} m). Every mast also carries a UWB anchor."},
+        {"key": "gateway", "name": "Gateway", "kind": "network", "count": 2, "why": "Primary and backup on the site office, both wired to the hub."},
+        {"key": "anchor", "name": "UWB anchor post", "kind": "network", "count": len(anchors),
+         "why": f"With the anchors on the masts, every work area has at least 3 anchors within {UWB_RANGE_M} m, so crew badges can be located."},
+        {"key": "badge", "name": "UWB badge", "kind": "wearable", "count": fp["crewUsed"] + c["crane"] * (1 + th) + c["trench"],
+         "why": "One per person, plus one on every crane, telehandler and trencher, so robots keep clear of them."},
+        {"key": "tablet", "name": "Supervisor tablet", "kind": "wearable", "count": _supervisors(fp["crew"]) + 1,
+         "why": "Foremen and safety leads get alerts and can resume robots on site; one for the build manager."},
     ]
 
     pts = [{"x": u["x"], "y": u["y"]} for u in units] + relays + _corners(office) + _corners(laydown)
@@ -205,6 +216,8 @@ def plan_site(unit_count: float, crew_size: float, ctx: PlannerContext, A: dict 
         "blocks": blocks,
         "relays": relays,
         "gateway": gateway,
+        "gateways": gateways,
+        "anchors": anchors,
         "office": office,
         "laydown": laydown,
         "trenchM": trench_m,
@@ -227,10 +240,11 @@ def plan_site(unit_count: float, crew_size: float, ctx: PlannerContext, A: dict 
 # ---------- relays ----------
 
 
-def _plan_relays(units, extra, gateway, ctx: PlannerContext, nw, se):
+def _plan_relays(units, extra, gateways, ctx: PlannerContext, nw, se):
     targets = np.array([[u["x"], u["y"]] for u in units] + [[p["x"], p["y"]] for p in extra], dtype=float)
-    R2 = ASSET_RANGE_M**2
-    need = [max(0, REDUNDANCY - (1 if _d2(t, gateway) <= R2 else 0)) for t in ({"x": a, "y": b} for a, b in targets)]
+    R2 = COVERAGE_RADIUS_M**2
+    gateway = gateways[0]
+    need = [max(0, REDUNDANCY - sum(1 for g in gateways if _d2(t, g) <= R2)) for t in ({"x": a, "y": b} for a, b in targets)]
 
     unit_hash: dict[tuple, list] = {}
     for u in units:
@@ -253,7 +267,7 @@ def _plan_relays(units, extra, gateway, ctx: PlannerContext, nw, se):
         while x <= se["x"]:
             c, r = math.floor(x / ctx.cell_m), math.floor(y / ctx.cell_m)
             p = {"x": x, "y": y}
-            if 0 <= c < ctx.cols and 0 <= r < ctx.rows and ctx.coverage[r * ctx.cols + c] and not near_unit(x, y) and _d2(p, gateway) >= 60**2:
+            if 0 <= c < ctx.cols and 0 <= r < ctx.rows and ctx.coverage[r * ctx.cols + c] and not near_unit(x, y) and all(_d2(p, g) >= 60**2 for g in gateways):
                 d2 = (targets[:, 0] - x) ** 2 + (targets[:, 1] - y) ** 2
                 cover = np.nonzero(d2 <= R2)[0].tolist()
                 if cover:
@@ -283,12 +297,12 @@ def _plan_relays(units, extra, gateway, ctx: PlannerContext, nw, se):
     link_only: set[int] = set()
     allp: list[dict] = list(picked)
     for _ in range(200):
-        connected = _reachable(gateway, allp, link)
+        connected = _reachable(gateways, allp, link)
         loose = [p for p in allp if id(p) not in connected]
         if not loose:
             break
         best_pair, best_d = None, math.inf
-        anchors = [gateway] + [p for p in allp if id(p) in connected]
+        anchors = list(gateways) + [p for p in allp if id(p) in connected]
         for u in loose:
             for c in anchors:
                 d = math.sqrt(_d2(u, c))
@@ -317,10 +331,10 @@ def _plan_relays(units, extra, gateway, ctx: PlannerContext, nw, se):
     return relays, uncovered
 
 
-def _reachable(gateway, nodes, rng):
+def _reachable(gateways, nodes, rng):
     r2 = rng * rng
     seen: set[int] = set()
-    queue = [gateway]
+    queue = list(gateways)
     while queue:
         cur = queue.pop(0)
         for n in nodes:
@@ -328,6 +342,60 @@ def _reachable(gateway, nodes, rng):
                 seen.add(id(n))
                 queue.append(n)
     return seen
+
+
+def _plan_anchors(units, extra, existing, ctx: PlannerContext, nw, se):
+    """UWB anchor posts so every work location has 3 anchors in range (masts and gateways count)."""
+    NEED = 3
+    R2 = UWB_RANGE_M**2
+    targets = [{"x": u["x"], "y": u["y"]} for u in units] + list(extra)
+    if not targets:
+        return [], 0
+    tx = np.array([t["x"] for t in targets], dtype=float)
+    ty = np.array([t["y"] for t in targets], dtype=float)
+    have = np.zeros(len(targets), dtype=int)
+    for e in existing:
+        have += ((tx - e["x"]) ** 2 + (ty - e["y"]) ** 2 <= R2).astype(int)
+    need = np.maximum(0, NEED - have)
+    # Candidate posts every 60 m over mapped ground near the work.
+    x0, x1 = tx.min() - UWB_RANGE_M, tx.max() + UWB_RANGE_M
+    y0, y1 = ty.min() - UWB_RANGE_M, ty.max() + UWB_RANGE_M
+    cands = []
+    for y in np.arange(max(nw["y"], y0), min(se["y"], y1) + 1, 60.0):
+        for x in np.arange(max(nw["x"], x0), min(se["x"], x1) + 1, 60.0):
+            c, r = int(x // ctx.cell_m), int(y // ctx.cell_m)
+            if not (0 <= c < ctx.cols and 0 <= r < ctx.rows) or not ctx.coverage[r * ctx.cols + c]:
+                continue
+            if any(abs(t["x"] - x) < UNIT_HALF_W + 4 and abs(t["y"] - y) < UNIT_HALF_H + 4 for t in targets):
+                continue
+            if any(_d2({"x": x, "y": y}, e) < 25 for e in existing):
+                continue
+            # Anchors are mesh nodes too: keep them inside relay coverage, ideally two relays'.
+            in_reach = sum(1 for e in existing if _d2({"x": x, "y": y}, e) <= COVERAGE_RADIUS_M**2 * 0.9)
+            if in_reach < min(2, len(existing)):
+                continue
+            cover = np.nonzero((tx - x) ** 2 + (ty - y) ** 2 <= R2)[0]
+            if len(cover):
+                cands.append(({"x": float(x), "y": float(y)}, cover))
+    picked = []
+    while need.any():
+        best, gain = -1, 0
+        for k, (_, cover) in enumerate(cands):
+            g = int((need[cover] > 0).sum())
+            if g > gain:
+                best, gain = k, g
+        if best < 0:
+            break
+        p, cover = cands.pop(best)
+        picked.append(p)
+        need[cover] = np.maximum(0, need[cover] - 1)
+    picked.sort(key=lambda p: (p["y"], p["x"]))
+    anchors = [{"id": f"A-{i + 1}", "x": _js_round(p["x"]), "y": _js_round(p["y"])} for i, p in enumerate(picked)]
+    return anchors, int((need > 0).sum())
+
+
+def _supervisors(crew: list[dict]) -> int:
+    return sum(r["count"] for r in crew if r["role"] in ("Foreman", "Safety lead"))
 
 
 # ---------- fleet sizing ----------

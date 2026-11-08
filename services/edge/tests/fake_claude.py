@@ -51,9 +51,9 @@ class FakeMessages:
             return NS(content=[_tool("propose_action", {"action": "plan.approve", "args": {}, "reason": "Plan looks good."})], stop_reason="tool_use")
         if "where" in low:
             return NS(content=[_tool("find_asset", {"query": "RPD-1"})], stop_reason="tool_use")
-        if "bad" in low:
-            return NS(content=[_tool("propose_action", {"action": "twin.pause", "args": {"id": "RPD-1"}, "reason": "x"})], stop_reason="tool_use")
-        return NS(content=[_tool("get_site_overview", {}), _tool("get_plan", {}), _tool("list_assets", {"issue": "stale"}), _tool("get_recent_events", {"limit": 3}), _tool("list_requests", {}), _tool("get_survey_status", {})], stop_reason="tool_use")
+        if "stop" in low and "rpd" in low:
+            return NS(content=[_tool("propose_action", {"action": "robot.stop", "args": {"robot": "RPD-1"}, "reason": "You asked to stop it."})], stop_reason="tool_use")
+        return NS(content=[_tool("get_site_overview", {}), _tool("get_plan", {}), _tool("list_assets", {"issue": "stopped"}), _tool("get_recent_events", {"limit": 3}), _tool("list_alerts", {}), _tool("get_tasks", {}), _tool("get_network_status", {}), _tool("get_survey_status", {})], stop_reason="tool_use")
 
 
 class FakeClaude:

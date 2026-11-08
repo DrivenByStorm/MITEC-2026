@@ -95,8 +95,9 @@ export function PlanPanel({ plan }: { plan: SitePlan }) {
         {tab === 'Network' && (
           <>
             <p className="hint">
-              Each unit is within reach of at least two relays, so one mast failing never cuts a work area off. Masts marked "link" only carry
-              traffic back to the gateway.
+              Each unit is within 300 m of at least two relays or gateways, so one mast failing never cuts a work area off. Masts marked "link"
+              only carry traffic back to a gateway. Two gateways on the office are wired to the hub. Every mast carries a UWB anchor, and
+              {` ${plan.anchors?.length ?? 0} `}anchor posts fill the gaps so crew badges always have three anchors in range.
             </p>
             <table className="table">
               <thead>

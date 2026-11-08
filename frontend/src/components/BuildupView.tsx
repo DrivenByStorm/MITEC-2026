@@ -186,6 +186,7 @@ function PlanCard({
             <li><strong>{f('telehandler')}</strong> telehandler{f('telehandler') === 1 ? '' : 's'}</li>
             <li><strong>{f('trencher')}</strong> trencher{f('trencher') === 1 ? '' : 's'}</li>
             <li><strong>{f('relay')}</strong> relay masts</li>
+            <li><strong>{f('anchor')}</strong> UWB anchors</li>
             <li><strong>{plan.crewUsed}</strong> people</li>
           </ul>
           <div className="button-row">

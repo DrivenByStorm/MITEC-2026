@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from typing import Any, Awaitable, Callable
 
 from .site import ACTIONS, ActionError, Site
-from .twin.network import ASSET_RANGE_M, RELAY_RANGE_M
+from .twin.network import COVERAGE_RADIUS_M, COVERAGE_TOLERANCE_M
 
 log = logging.getLogger("edge.agent")
 
@@ -30,35 +31,43 @@ NO_UPDATE = "NO_UPDATE"
 SYSTEM_PROMPT = f"""You are the site agent for an Exowatt P3 solar-thermal construction site in rural West Texas. \
 You work for the build manager, who talks to you through a chat box under a live 2D digital twin of the site.
 
-The site has no internet. Robots, machines and relays talk over a local mesh; workers wear LoRa + UWB tags. \
-The digital twin runs on the site's edge server. Positions are site meters (x east, y south).
-
-The twin moves through three stages:
+The site has no internet (an optional satellite uplink is how you are reached). The twin moves through three stages:
 1. survey: a scout drone traces a square boundary at a distance the manager sets, then survey drones map sections \
    (A1, B3, ...) and reveal elevation. The manager can map more gaps or lock the survey.
 2. buildup: the manager sets the number of P3 units and the crew available. The planner (rule-based, not you) \
-   places units on flat mapped ground in blocks (A, B, ...) and decides relays, robots, machines, crew and schedule. \
-   Never choose the number of units yourself; that is always the manager's decision.
-3. construction: the approved plan is built live. Pile-driving robots (RPD-n), cranes (CR-n), telehandlers (TH-n), \
-   trenchers (TR-n), a drone (DR-1), relay masts (M-n) and the gateway (GW). Each machine reaches the network through \
-   a relay within {ASSET_RANGE_M} m; relays mesh within {RELAY_RANGE_M} m. The plan gives every work area two relays, \
-   so one relay failing should not cut anything off. Assets out of coverage go stale on the map but keep working and \
-   sync when they reconnect. Workers are W-nn with names like "J. Ortiz". Unit ids look like B-04-12 (block B, row 4, slot 12).
+   places units on flat mapped ground in blocks (A, B, ...) and decides relays, gateways, UWB anchors, robots, \
+   machines, crew and schedule. Never choose the number of units yourself; that is always the manager's decision.
+3. construction: the approved plan is built over the site mesh (mesh spec v0.1):
+   - Relays (M-n) and two gateways (GW-1, GW-2, wired to the hub) flood every packet. Each relay covers {COVERAGE_RADIUS_M} m; \
+     the plan gives every work area two relays, so one failing should not cut anything off.
+   - Robots: pile drivers RPD-n and a survey bot SB-n. A robot hears relays directly (depth 0) or reaches the mesh through \
+     up to two neighbor robots (depth 1-2), and may work up to {COVERAGE_TOLERANCE_M} m outside coverage. No mesh path for 1.5 s \
+     means it stops (LOST_MESH_CONTACT). Robots split the work among themselves (CBAA auctions); the hub only publishes tasks.
+   - Crew, supervisors and manual machines (cranes CR-n, telehandlers TH-n, trenchers TR-n) carry UWB badges; the hub \
+     fuses UWB ranges into tracks. Robots hold for people and machines nearby (CREW_HOLD) and for each other \
+     (PROXIMITY_YIELD); holds clear by themselves.
+   - Stops need a RESUME: remotely (from you via the manager) for lost contact, zone breach, supervisor stop and out of \
+     coverage, once the cause has cleared; near miss, person detected, collision and fault need a supervisor standing \
+     at the robot. Suggest walking a supervisor over for those instead of a remote resume.
+   - The hub raises alerts (node lost with cause, near miss, crew in zone, stop needs resume, shortfall, sign-off \
+     needed, ...) to the nearest supervisor and escalates unacknowledged ones.
+   Unit ids look like B-04-12 (block B, row 4, slot 12). Crew are named like "J. Ortiz".
 
 How you work:
 - You are SUGGEST-ONLY. You cannot change anything on site. To suggest a change, call propose_action; it appears in the \
-  chat as a card the manager can approve or dismiss. Even when the manager tells you to do something ("start the survey \
-  at 2 km"), propose it; their click is the approval. Don't claim an action happened until you're told it was approved.
+  chat as a card the manager can approve or dismiss. Even when the manager tells you to do something, propose it; \
+  their click is the approval. Don't claim an action happened until you're told it was approved.
 - Look things up with your tools instead of guessing. Use names and numbers from the twin.
 - Be brief and concrete: plain sentences, no headings, at most a few short lines. Lead with what matters. \
   Say what you'd do and why in one line, then propose it.
 - When the message starts with [Site monitor], nobody asked: decide whether the manager needs to know. If it's routine or \
-  already handled (e.g. traffic rerouted with no loss of contact), reply with exactly {NO_UPDATE}. Otherwise write a short \
-  heads-up, with a proposal if there's a clear next step.
+  already handled (traffic rerouted, a hold that cleared, a supervisor already handling it), reply with exactly {NO_UPDATE}. \
+  Otherwise write a short heads-up, with a proposal if there's a clear next step.
 - Messages starting with [Manager action] tell you what the manager did directly with the UI; take them into account.
 """
 
-ACTION_NAMES = list(ACTIONS)
+
+ACTION_NAMES = [n for n, v in ACTIONS.items() if v[3]]
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -78,47 +87,51 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_asset",
-        "description": "Find one robot, machine, drone, relay or worker by id or name (e.g. 'RPD-1', 'M-4', 'Ortiz') and get its last reported state, block, link and how long ago it reported. Also highlights it on the manager's map.",
+        "description": "Find one robot, relay, gateway, anchor, supervisor, crew member or machine by id or name (e.g. 'RPD-1', 'M-4', 'Ortiz', 'CR-1') and get what the twin knows: mode, stop reason, task, battery, mesh depth and attached node, liveness, last heard, block. Also highlights it on the manager's map.",
         "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     {
         "name": "list_assets",
-        "description": "List assets during construction, optionally filtered.",
+        "description": "List nodes and tracks during construction, optionally filtered.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["robot", "machine", "drone", "worker", "relay"]},
+                "kind": {"type": "string", "enum": ["robot", "relay", "anchor", "supervisor", "crew", "machine", "unknown"]},
                 "block": {"type": "string", "description": "Block letter, e.g. 'B'"},
-                "issue": {"type": "string", "enum": ["stale", "offline", "paused", "idle", "low_energy", "out_of_coverage"]},
+                "issue": {"type": "string", "enum": ["stopped", "hold", "lost", "late", "low_battery", "out_of_coverage_band", "via_robot", "stale_track"]},
             },
         },
     },
     {
         "name": "get_network_status",
-        "description": "Relay mesh health during construction: relays up/down, which assets are out of coverage, satellite uplink.",
+        "description": "Mesh health: relays and gateways (liveness, load, drops, gateway hops), relay links, robots' mesh depth and attachment, hub links (gateways up, Starlink, HQ sync), packet rate.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_alerts",
+        "description": "Hub alerts (newest first): kind, severity, subjects, which supervisors were notified and whether anyone acknowledged.",
+        "input_schema": {"type": "object", "properties": {"open_only": {"type": "boolean"}}},
+    },
+    {
+        "name": "get_tasks",
+        "description": "Tasks the hub has published and their items: state counts, which robot holds what, held or awaiting sign-off items, shortfall; plus units set by cranes.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_recent_events",
-        "description": "Recent site log entries for the current stage, newest first.",
+        "description": "The hub's event log (stops, item changes, alerts, acks, commands, node losses) or the survey log, newest first.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "level": {"type": "string", "enum": ["info", "warn", "alert"]},
                 "contains": {"type": "string", "description": "Only entries containing this text (case-insensitive)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 40},
             },
         },
     },
     {
-        "name": "list_requests",
-        "description": "Equipment requests during construction (pending, en-route, arrived, done, cancelled).",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
         "name": "propose_action",
         "description": "Suggest a change to the site. It is shown to the build manager as a card with Approve / Dismiss and runs only if approved. "
-        "Actions: " + " ".join(f"{n}: {d} args {json.dumps(a)}." for n, (_, d, a) in ACTIONS.items()),
+        "Actions: " + " ".join(f"{n}: {d} args {json.dumps(a)}." for n, (_, d, a, agent) in ACTIONS.items() if agent),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -244,32 +257,29 @@ class SiteAgent:
         out: dict[str, Any] = {
             "stage": site.stage,
             "survey": {"phase": s.phase, "distanceM": s.distance_m, "coveragePct": round(st["coverage"] * 100), "areaKm2": round(st["perimeterAreaKm2"], 2), "terrain": "real" if s.terrain.real else "synthetic"},
-            "availableActions": site.available_actions(),
+            "availableActions": site.available_actions(for_agent=True),
         }
         if site.plan:
             p = site.plan
-            out["plan"] = {"unitsRequested": p["input"]["unitCount"], "unitsPlaced": len(p["units"]), "crewAvailable": p["input"]["crewSize"], "crewUsed": p["crewUsed"], "relays": len(p["relays"]), "totalDays": p["totalDays"], "bottleneck": p["bottleneck"], "warnings": p["warnings"]}
-        if site.sim:
-            snap = site.sim.snapshot()
-            units = snap["units"]
-            now = snap["now"]
-            assets = snap["assets"]
-            stale = [a["name"] for a in assets if a["kind"] != "relay" and now - a["lastHeard"] > 30000]
-            relays = [a for a in assets if a["kind"] == "relay"]
-            down = [a["name"] for a in relays if a["mode"] == "offline" or a["link"] == "none"]
+            out["plan"] = {"unitsRequested": p["input"]["unitCount"], "unitsPlaced": len(p["units"]), "crewAvailable": p["input"]["crewSize"], "crewUsed": p["crewUsed"], "relays": len(p["relays"]), "anchors": len(p.get("anchors", [])), "totalDays": p["totalDays"], "bottleneck": p["bottleneck"], "warnings": p["warnings"]}
+        snap, planning = site.mesh.snapshot, site.mesh.planning
+        if site.construction and snap:
+            robots = [n for n in snap["nodes"] if n["kind"] == 4]
+            relays = [n for n in snap["nodes"] if n["kind"] in (2, 3)]
+            units = planning["units"] if planning else []
+            open_alerts = [a for a in snap["alerts"] if not a.get("ack") and a["kind"] != 10]
             out["construction"] = {
-                "unitsInstalled": sum(u["status"] == "installed" for u in units),
-                "unitsPiled": sum(u["status"] == "piled" for u in units),
+                "unitsPiled": sum(u["status"] in ("piled", "installed") for u in units),
+                "unitsSet": sum(u["status"] == "installed" for u in units),
                 "unitsTotal": len(units),
-                "people": sum(a["kind"] == "worker" for a in assets),
-                "machines": sum(a["kind"] in ("robot", "machine", "drone") for a in assets),
-                "relaysUp": f"{len(relays) - len(down)} of {len(relays)}",
-                "relaysDown": down,
-                "stale": stale,
-                "paused": [a["name"] for a in assets if a["mode"] == "paused"],
-                "openRequests": [r["id"] for r in snap["requests"] if r["status"] not in ("done", "cancelled")],
-                "uplink": "up" if snap["uplink"]["online"] else "down",
-                "minutesElapsed": round(site.sim.tick_count / 60, 1),
+                "robots": {n["name"]: _robot_brief(n) for n in robots},
+                "relaysUp": f"{sum(1 for r in relays if r['liveness'] != 2)} of {len(relays)}",
+                "relaysLost": [r["name"] for r in relays if r["liveness"] == 2],
+                "tracks": _count(t["kind"] for t in snap["tracks"]["list"]),
+                "openAlerts": [f"{a['alertId']}: {_ALERT.get(a['kind'], a['kind'])}" for a in open_alerts[:8]],
+                "gatewaysUp": len(snap["hubLinks"]["gatewaysUp"]),
+                "starlink": "up" if snap["hubLinks"]["starlinkUp"] else "down",
+                "sim": site.mesh.status,
             }
         return out
 
@@ -306,92 +316,136 @@ class SiteAgent:
             "trenchKm": round(p["trenchM"] / 1000, 2),
             "meanHaulM": round(p["meanHaulM"]),
             "relays": [{"id": r["id"], "covers": r["covers"], "linkOnly": r["linkOnly"]} for r in p["relays"]],
+            "anchors": len(p.get("anchors", [])),
             "warnings": p["warnings"],
             "assumptions": p["assumptions"],
-            "approved": self.site.sim is not None,
+            "approved": self.site.construction,
         }
 
-    def _assets(self) -> list[dict]:
-        site = self.site
-        if site.sim:
-            return list(site.sim.snapshot()["assets"])
-        snap = site.survey.snapshot()
-        return [{**d, "kind": "drone", "name": d["id"], "mode": d["status"], "energy": d["battery"], "lastHeard": snap["now"], "link": "mesh"} for d in snap["drones"]]
+    # ---------- construction views ----------
 
-    def _describe(self, a: dict, now: int) -> dict:
-        out = {k: a.get(k) for k in ("id", "name", "kind", "role", "mode", "task", "energy", "link", "via")}
-        out["x"], out["y"] = round(a["x"]), round(a["y"])
-        out["lastHeardSecondsAgo"] = max(0, round((now - a.get("lastHeard", now)) / 1000))
-        sim = self.site.sim
-        if sim:
-            b = next((b for b in sim.blocks if b["x"] - 10 <= a["x"] <= b["x"] + b["w"] + 10 and b["y"] - 10 <= a["y"] <= b["y"] + b["h"] + 30), None)
-            out["block"] = b["id"] if b else None
-        return {k: v for k, v in out.items() if v is not None}
+    def _block_at(self, pos: dict | None) -> str | None:
+        p = self.site.plan
+        if not p or not pos:
+            return None
+        x, y = self.site.frame.to_twin(pos)
+        b = next((b for b in p["blocks"] if b["x"] - 10 <= x <= b["x"] + b["w"] + 10 and b["y"] - 10 <= y <= b["y"] + b["h"] + 30), None)
+        return b["id"] if b else None
+
+    def _entities(self) -> list[dict]:
+        """Every node and track the twin knows about, in one shape."""
+        site = self.site
+        snap = site.mesh.snapshot
+        if not site.construction or not snap:
+            s = site.survey.snapshot()
+            return [{"id": d["id"], "name": d["id"], "kind": "drone", "status": d["status"], "battery": d["battery"], "task": d["task"]} for d in s["drones"]]
+        now = snap["now"]
+        kinds = {1: "hub", 2: "relay", 3: "relay", 4: "robot", 5: "supervisor", 6: "anchor"}
+        out = []
+        for n in snap["nodes"]:
+            e = {"id": n["id"], "name": n["name"], "kind": kinds.get(n["kind"], "node"), "liveness": ["fresh", "late", "lost"][n["liveness"]], "lastHeardSecondsAgo": max(0, round((now - n["lastHeard"]) / 1000)), "block": self._block_at(n.get("pos"))}
+            if n["kind"] == 2:
+                e["gateway"] = True
+            if n.get("robot"):
+                e.update(_robot_brief(n))
+                via = n["robot"].get("via")
+                e["via"] = site.name_of(via) if via else None
+                e["viaRobot"] = bool(via) and any(r["node"] == via for r in site.sim_input["config"]["robots"])
+            if n.get("relay"):
+                r = n["relay"]
+                e.update({"gatewayHops": r["gatewayHops"], "neighbors": len(r["neighbors"]), "queueDrops": sum(r["qDrop"]), "forwarded": sum(r["fwd"])})
+            out.append(e)
+        tk = {1: "crew", 2: "supervisor", 3: "machine", 4: "unknown"}
+        for t in snap["tracks"]["list"]:
+            out.append({"id": str(t["id"]), "name": site.name_of(str(t["id"])) if t["kind"] != 4 else f"Unknown object {t['id']}", "kind": tk.get(t["kind"], "track"), "accuracyM": round(t["acc"] / 100, 1), "stale": t["stale"], "block": self._block_at(t["pos"]), "speedMs": round(math.hypot(t["vx"], t["vy"]) / 100, 1)})
+        return out
 
     def _tool_find_asset(self, args, result):
         q = str(args.get("query", "")).strip().lower().rstrip(".?!")
-        assets = self._assets()
-        hit = (
-            next((a for a in assets if a["id"].lower() == q or a["name"].lower() == q), None)
-            or next((a for a in assets if q and (q in a["name"].lower() or q in a["id"].lower())), None)
-            or next((a for a in assets if a.get("role", "").lower() == q), None)
-        )
+        ents = self._entities()
+        hit = next((e for e in ents if e["id"].lower() == q or e["name"].lower() == q), None) or next((e for e in ents if q and q in e["name"].lower()), None)
         if not hit:
-            return {"error": f"No asset matching '{args.get('query')}'."}
+            return {"error": f"Nothing matching '{args.get('query')}'."}
         result["select"] = hit["id"]
-        return self._describe(hit, int(time.time() * 1000))
+        return hit
 
     def _tool_list_assets(self, args, result):
-        if not self.site.sim:
-            return {"assets": [self._describe(a, int(time.time() * 1000)) for a in self._assets()], "note": "Construction hasn't started; these are the survey drones."}
-        now = int(time.time() * 1000)
-        items = [self._describe(a, now) for a in self._assets()]
+        items = self._entities()
         if args.get("kind"):
-            items = [a for a in items if a["kind"] == args["kind"]]
+            items = [e for e in items if e["kind"] == args["kind"]]
         if args.get("block"):
-            items = [a for a in items if a.get("block") == str(args["block"]).upper()]
+            items = [e for e in items if e.get("block") == str(args["block"]).upper()]
         issue = args.get("issue")
-        if issue == "stale":
-            items = [a for a in items if a["lastHeardSecondsAgo"] > 30 and a["kind"] != "relay"]
-        elif issue == "offline":
-            items = [a for a in items if a["mode"] == "offline"]
-        elif issue == "paused":
-            items = [a for a in items if a["mode"] == "paused"]
-        elif issue == "idle":
-            items = [a for a in items if a["mode"] == "idle"]
-        elif issue == "low_energy":
-            items = [a for a in items if a.get("energy", 100) < 25]
-        elif issue == "out_of_coverage":
-            items = [a for a in items if a.get("link") == "none"]
-        return {"count": len(items), "assets": items[:40], "truncated": len(items) > 40}
+        tests = {
+            "stopped": lambda e: e.get("mode") == "STOPPED",
+            "hold": lambda e: e.get("mode") == "HOLD",
+            "lost": lambda e: e.get("liveness") == "lost",
+            "late": lambda e: e.get("liveness") == "late",
+            "low_battery": lambda e: e.get("battery", 100) < 25,
+            "out_of_coverage_band": lambda e: e.get("inCoverageBand"),
+            "via_robot": lambda e: e.get("viaRobot"),
+            "stale_track": lambda e: e.get("stale"),
+        }
+        if issue in tests:
+            items = [e for e in items if tests[issue](e)]
+        return {"count": len(items), "items": items[:40], "truncated": len(items) > 40}
 
     def _tool_get_network_status(self, args, result):
-        sim = self.site.sim
-        if not sim:
+        snap = self.site.mesh.snapshot
+        if not self.site.construction or not snap:
             p = self.site.plan
             return {"note": "Construction hasn't started.", "plannedRelays": len(p["relays"]) if p else None}
-        snap = sim.snapshot()
-        relays = [a for a in snap["assets"] if a["kind"] == "relay"]
+        name = self.site.name_of
+        relays = [n for n in snap["nodes"] if n["kind"] in (2, 3)]
+        robots = [n for n in snap["nodes"] if n["kind"] == 4 and n.get("robot")]
         return {
-            "relays": [{"id": r["id"], "mode": r["mode"], "link": r["link"], "energy": r["energy"]} for r in relays],
-            "meshLinks": len(snap["links"]),
-            "outOfCoverage": [a["name"] for a in snap["assets"] if a["kind"] != "relay" and a["link"] == "none"],
-            "uplink": snap["uplink"],
+            "relays": [{"name": r["name"], "gateway": r["kind"] == 2, "liveness": ["fresh", "late", "lost"][r["liveness"]], "gatewayHops": (r.get("relay") or {}).get("gatewayHops"), "queueDrops": sum((r.get("relay") or {}).get("qDrop", [0])), "neighbors": len((r.get("relay") or {}).get("neighbors", []))} for r in relays],
+            "links": len(snap["links"]),
+            "robots": [{"name": r["name"], "via": name(r["robot"]["via"]) if r["robot"].get("via") else None, "liveness": ["fresh", "late", "lost"][r["liveness"]]} for r in robots],
+            "hub": {"gatewaysUp": [name(g) for g in snap["hubLinks"]["gatewaysUp"]], "starlink": snap["hubLinks"]["starlinkUp"]},
+            "sim": self.site.mesh.status,
         }
+
+    def _tool_list_alerts(self, args, result):
+        snap = self.site.mesh.snapshot
+        if not snap:
+            return {"note": "Construction hasn't started."}
+        name = self.site.name_of
+        out = []
+        for a in snap["alerts"]:
+            if args.get("open_only") and a.get("ack"):
+                continue
+            out.append({"alertId": a["alertId"], "kind": _ALERT.get(a["kind"], a["kind"]), "severity": ["info", "warning", "urgent"][a["severity"]], "subjects": [name(s) for s in a["subjects"]], "taskId": a["taskId"] or None, "itemId": a["itemId"] or None, "ref": a["ref"], "notified": [name(n) for n in a["notified"]], "ack": {"by": name(a["ack"]["by"]), "action": ["seen", "handling", "needs help"][a["ack"]["action"]]} if a.get("ack") else None})
+        return out[:25]
+
+    def _tool_get_tasks(self, args, result):
+        snap, planning = self.site.mesh.snapshot, self.site.mesh.planning
+        if not snap:
+            return {"note": "Construction hasn't started."}
+        name = self.site.name_of
+        labels = {t["taskId"]: t["label"] for t in (planning or {}).get("tasks", [])}
+        states = ["OPEN", "ASSIGNED", "STARTED", "DONE", "CANCELLED", "HELD", "AWAITING_SIGNOFF"]
+        tasks = []
+        for t in snap["tasks"]:
+            counts = _count(states[i["state"]] for i in t["items"])
+            working = [f"{name(i['winNode'])}: item {i['itemId']} ({states[i['state']].lower()})" for i in t["items"] if i["state"] in (1, 2) and i.get("winNode")]
+            special = [{"itemId": i["itemId"], "state": states[i["state"]]} for i in t["items"] if i["state"] in (5, 6)]
+            tasks.append({"taskId": t["task"]["taskId"], "label": labels.get(t["task"]["taskId"], ""), "mode": t["task"]["mode"], "robotCount": t["task"]["robotCount"], "counts": counts, "working": working, "heldOrSignoff": special[:10], "shortfall": t["shortfall"]})
+        queued = [t for t in (planning or {}).get("tasks", []) if t["status"] == "queued"]
+        units = (planning or {}).get("units", [])
+        return {"tasks": tasks, "queued": [t["label"] for t in queued][:10], "units": _count(u["status"] for u in units)}
 
     def _tool_get_recent_events(self, args, result):
         site = self.site
-        events = site.sim.events if site.sim else site.survey.events
-        lvl, contains = args.get("level"), str(args.get("contains") or "").lower()
-        out = [e for e in events if (not lvl or e["level"] == lvl) and (not contains or contains in e["text"].lower())]
+        contains = str(args.get("contains") or "").lower()
+        limit = int(args.get("limit") or 15)
+        if site.construction:
+            entries = list(reversed(site.mesh.hub_log))
+            now = (site.mesh.snapshot or {}).get("now", 0)
+            out = [{"secondsAgo": round((now - e["at"]) / 1000), "kind": e["kind"], "text": e["text"]} for e in entries if not contains or contains in e["text"].lower()]
+            return out[:limit]
         now = time.time() * 1000
-        return [{"secondsAgo": round((now - e["at"]) / 1000), "level": e["level"], "text": e["text"]} for e in out[: int(args.get("limit") or 15)]]
-
-    def _tool_list_requests(self, args, result):
-        sim = self.site.sim
-        if not sim:
-            return {"note": "Construction hasn't started."}
-        return [{k: r[k] for k in ("id", "need", "status", "assignedTo", "eta")} | {"target": r["target"]["label"]} for r in sim.requests[:20]]
+        return [{"secondsAgo": round((now - e["at"]) / 1000), "level": e["level"], "text": e["text"]} for e in site.survey.events if not contains or contains in e["text"].lower()][:limit]
 
     # ---------- history ----------
 
@@ -420,9 +474,10 @@ def _tool_label(name: str, args: dict) -> str:
         "get_plan": "Read the buildup plan",
         "find_asset": f"Looked up {args.get('query', '')}",
         "list_assets": "Listed assets" + (f" ({', '.join(str(v) for v in args.values())})" if args else ""),
-        "get_network_status": "Checked the relay network",
+        "get_network_status": "Checked the mesh",
         "get_recent_events": "Read the site log",
-        "list_requests": "Checked equipment requests",
+        "list_alerts": "Checked alerts",
+        "get_tasks": "Checked tasks",
         "propose_action": f"Suggested: {args.get('action', '')}",
     }.get(name, name)
 
@@ -443,3 +498,32 @@ def _json_default(o):
         return float(o)
     except Exception:
         return str(o)
+
+
+_ALERT = {1: "NODE_LOST", 2: "NEAR_MISS", 3: "CREW_IN_ZONE", 4: "STOP_NEEDS_RESUME", 5: "CREW_HOLD_LONG", 6: "POSITION_MISMATCH", 7: "SHORTFALL", 8: "ITEM_FAILED", 9: "DUPLICATE_START", 10: "MANUAL_TASK", 11: "SIGNOFF_NEEDED"}
+_MODES = ["IDLE", "TO_ITEM", "WORKING", "STOPPED", "CHARGING", "OUT_OF_SERVICE", "MANUAL_OVERRIDE", "HOLD"]
+_STOPS = {0: None, 1: "LOST_MESH_CONTACT", 2: "NEAR_MISS", 3: "PERSON_DETECTED", 4: "COLLISION", 5: "FAULT", 6: "ZONE_BREACH", 7: "SUPERVISOR_STOP", 8: "LOW_BATTERY", 9: "OUT_OF_COVERAGE", 20: "CREW_HOLD", 21: "PROXIMITY_YIELD"}
+
+
+def _robot_brief(n: dict) -> dict:
+    r = n.get("robot") or {}
+    return {
+        "mode": _MODES[r.get("mode", 0)] if r else None,
+        "stopReason": _STOPS.get(r.get("stopReason", 0)),
+        "stopId": r.get("stopId") or None,
+        "battery": r.get("batteryPct"),
+        "taskId": r.get("taskId") or None,
+        "itemId": r.get("itemId") or None,
+        "positionSource": ["RTK fixed", "RTK float", "GPS", "dead reckoning"][r.get("posSource", 0)] if r else None,
+        "positionAccuracyCm": r.get("posAcc"),
+        "inCoverageBand": bool(r.get("flags", 0) & 4),
+        "tracksStale": bool(r.get("flags", 0) & 8),
+        "liveness": ["fresh", "late", "lost"][n.get("liveness", 0)],
+    }
+
+
+def _count(it) -> dict:
+    out: dict = {}
+    for k in it:
+        out[k] = out.get(k, 0) + 1
+    return out

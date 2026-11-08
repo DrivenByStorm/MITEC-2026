@@ -54,15 +54,15 @@ def main():
             ws.send_text(json.dumps({"type": "action", "id": 2, "name": "plan.approve", "args": {}}))
             r = recv_until(ws, lambda m: m["type"] == "result")
             print("approve w/o plan:", r["ok"], r["text"][:70])
-            ws.send_text(json.dumps({"type": "action", "id": 3, "name": "plan.generate", "args": {"unitCount": 240, "crewSize": 30}}))
+            ws.send_text(json.dumps({"type": "action", "id": 3, "name": "plan.generate", "args": {"unitCount": 240, "crewSize": 40}}))
             p = recv_until(ws, lambda m: m["type"] == "plan")
             print("plan:", len(p["plan"]["units"]), "units", len(p["preview"]["assets"]), "preview assets")
             ws.send_text(json.dumps({"type": "chat", "text": "approve it"}))
             m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent" and m["message"]["suggestions"])
             ws.send_text(json.dumps({"type": "decide", "suggestionId": m["message"]["suggestions"][0]["id"], "approve": True}))
             recv_until(ws, lambda m: m["type"] == "stage" and m["stage"] == "construction")
-            t = recv_until(ws, lambda m: m["type"] == "twin" and m["snapshot"])
-            print("twin assets", len(t["snapshot"]["assets"]))
+            t = recv_until(ws, lambda m: m["type"] == "twin")
+            print("twin nodes", len(t["mesh"]["nodes"]), "robots", [n["name"] for n in t["mesh"]["nodes"] if n["kind"] == 4])
             ws.send_text(json.dumps({"type": "chat", "text": "where is the pile robot?"}))
             m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent")
             print("where:", m["message"]["select"], m["message"]["text"][:90])
@@ -70,8 +70,26 @@ def main():
             m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent")
             print("overview tools:", m["message"]["tools"])
             assert "error" not in m["message"]["text"].lower(), m["message"]["text"]
-            ws.send_text(json.dumps({"type": "action", "id": 4, "name": "twin.request", "args": {"need": "telehandler", "target": "B7"}}))
-            print("request:", recv_until(ws, lambda m: m["type"] == "result")["text"])
+            # Agent suggests stopping a robot; approve; then resume it directly.
+            ws.send_text(json.dumps({"type": "chat", "text": "stop RPD-1"}))
+            m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent" and m["message"]["suggestions"])
+            ws.send_text(json.dumps({"type": "decide", "suggestionId": m["message"]["suggestions"][0]["id"], "approve": True}))
+            m = recv_until(ws, lambda m: m["type"] == "chat" and any(s.get("status") in ("approved", "failed") for s in m["message"].get("suggestions") or []))
+            print("stop:", m["message"]["suggestions"][0]["status"], m["message"]["suggestions"][0].get("result"))
+            assert m["message"]["suggestions"][0]["status"] == "approved"
+            recv_until(ws, lambda m: m["type"] == "twin" and any(n["name"] == "RPD-1" and n.get("robot", {}).get("mode") == 3 for n in m["mesh"]["nodes"]))
+            ws.send_text(json.dumps({"type": "action", "id": 5, "name": "robot.resume", "args": {"robot": "RPD-1"}}))
+            r = recv_until(ws, lambda m: m["type"] == "result")
+            print("resume:", r["ok"], r["text"])
+            assert r["ok"], r["text"]
+            ws.send_text(json.dumps({"type": "action", "id": 6, "name": "sim.inject", "args": {"kind": "relay_down"}}))
+            print("inject:", recv_until(ws, lambda m: m["type"] == "result")["text"])
+            ws.send_text(json.dumps({"type": "action", "id": 7, "name": "zone.add", "args": {"kind": "NO_GO", "at": "laydown", "radiusM": 20, "minutes": 5}}))
+            r = recv_until(ws, lambda m: m["type"] == "result")
+            print("zone:", r["ok"], r["text"])
+            assert r["ok"]
+            t = recv_until(ws, lambda m: m["type"] == "twin" and any(z["kind"] == 1 for z in m["mesh"]["zones"]["list"]))
+            print("zones:", [z["kind"] for z in t["mesh"]["zones"]["list"]], "tracks", len(t["mesh"]["tracks"]["list"]), "units", t["planning"]["units"][0])
     # tool results never errored
     for call in fake.messages.calls:
         for msg in call["messages"]:

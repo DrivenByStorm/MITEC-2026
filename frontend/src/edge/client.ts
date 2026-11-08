@@ -8,6 +8,8 @@ import { useEffect, useSyncExternalStore } from 'react'
 import type { SurveySnapshot } from '../survey/types'
 import type { TwinSnapshot } from '../twin/types'
 import type { SitePlan } from '../buildup/types'
+import type { MeshEvent, MeshSnapshot, MeshTrace } from '../mesh/types'
+import type { MeshConfig, PlanningView, SimStatus } from '../mesh/adapter'
 import type { Pt } from '../survey/types'
 
 export type Stage = 'survey' | 'buildup' | 'construction'
@@ -21,11 +23,20 @@ export type ActionName =
   | 'survey.lock'
   | 'plan.generate'
   | 'plan.approve'
-  | 'twin.pause'
-  | 'twin.resume'
-  | 'twin.pauseAll'
-  | 'twin.request'
-  | 'twin.cancelRequest'
+  | 'robot.resume'
+  | 'robot.stop'
+  | 'robot.outOfService'
+  | 'robot.returnToService'
+  | 'item.cancel'
+  | 'item.release'
+  | 'item.signOff'
+  | 'item.redirect'
+  | 'zone.add'
+  | 'zone.remove'
+  | 'alert.ack'
+  | 'sim.speed'
+  | 'sim.inject'
+  | 'mesh.trace'
 
 export type Act = (name: ActionName, args?: Record<string, unknown>) => Promise<ActionResult>
 
@@ -88,13 +99,19 @@ export interface EdgeState {
   /** Furthest stage the site has reached. */
   stage: Stage
   terrain: TerrainInfo | null
-  network: { relayRangeM: number; assetRangeM: number; loraRangeM: number }
+  network: { relayRangeM: number; assetRangeM: number; robotRangeM: number; uwbRangeM: number; toleranceM: number }
   survey: SurveySnapshot | null
   coverageVersion: number
   plan: SitePlan | null
   preview: TwinSnapshot | null
   planVersion: number
-  twin: TwinSnapshot | null
+  /** Construction: the hub mesh service's snapshot (12.1), planning progress, sim status. */
+  twin: { mesh: MeshSnapshot; planning: PlanningView; status: SimStatus; hubLog: { at: number; kind: string; text: string }[] } | null
+  meshConfig: MeshConfig | null
+  /** Recent mesh events (newest last). */
+  meshEvents: (MeshEvent & { recv: number })[]
+  /** Notes from the simulator (scripted demo events, robot logs). */
+  meshLog: { at: number; who: string; text: string }[]
   chat: ChatMessage[]
   agent: AgentState
 }
@@ -125,6 +142,16 @@ class EdgeClient {
   /** 1 where the drones have mapped the ground (mutated in place; watch coverageVersion). */
   coverage = new Uint8Array(0)
 
+  /** Packet traces (12.2), kept outside React state: the map's animation reads them each frame. */
+  traces: (MeshTrace & { recv: number })[] = []
+  private traceListeners = new Set<() => void>()
+  onTraces = (l: () => void) => {
+    this.traceListeners.add(l)
+    return () => {
+      this.traceListeners.delete(l)
+    }
+  }
+
   private state: EdgeState
   private ws: WebSocket | null = null
   private listeners = new Set<() => void>()
@@ -139,13 +166,16 @@ class EdgeClient {
       ready: false,
       stage: 'survey',
       terrain: null,
-      network: { relayRangeM: 460, assetRangeM: 270, loraRangeM: 2000 },
+      network: { relayRangeM: 460, assetRangeM: 300, robotRangeM: 120, uwbRangeM: 150, toleranceM: 3 },
       survey: null,
       coverageVersion: -1,
       plan: null,
       preview: null,
       planVersion: 0,
       twin: null,
+      meshConfig: null,
+      meshEvents: [],
+      meshLog: [],
       chat: [],
       agent: { online: false, status: 'connecting', busy: false, activity: '', model: '' },
     }
@@ -259,6 +289,7 @@ class EdgeClient {
           preview: m.preview ?? null,
           planVersion: m.planVersion,
           twin: m.twin ?? null,
+          meshConfig: m.meshConfig ?? null,
           chat: m.chat ?? [],
           agent: m.agent,
         })
@@ -267,7 +298,24 @@ class EdgeClient {
       case 'survey':
         return this.set({ survey: m.snapshot, ...this.applyCoverage(m.coverage) })
       case 'twin':
-        return this.set({ twin: m.snapshot ?? null })
+        return this.set({ twin: { mesh: m.mesh, planning: m.planning, status: m.status, hubLog: m.hubLog ?? [] } })
+      case 'meshConfig':
+        return this.set({ meshConfig: m.config ?? null })
+      case 'meshEvents': {
+        const recv = Date.now()
+        const add = (m.events as MeshEvent[]).filter((e) => e.kind !== 'packet').map((e) => ({ ...e, recv }))
+        if (!add.length) return
+        return this.set({ meshEvents: [...this.state.meshEvents, ...add].slice(-300) })
+      }
+      case 'meshLog':
+        return this.set({ meshLog: [...this.state.meshLog, ...m.lines].slice(-200) })
+      case 'traces': {
+        const recv = performance.now()
+        for (const t of m.traces as MeshTrace[]) this.traces.push({ ...t, recv })
+        if (this.traces.length > 4000) this.traces.splice(0, this.traces.length - 4000)
+        for (const l of this.traceListeners) l()
+        return
+      }
       case 'plan':
         return this.set({ plan: m.plan ?? null, preview: m.preview ?? null, planVersion: m.version })
       case 'stage':

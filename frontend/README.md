@@ -52,13 +52,22 @@ Set the boundary distance on the map and start the survey, or ask the agent. The
 
 ## Buildup stage
 
-Enter **P3 units to build** and **Crew available**, then **Generate plan**, or ask the agent. The number of units is always yours. The planner decides the layout on flat mapped ground, the relays (every unit within reach of two), the fleet and crew, and the schedule. **Plan details** gives the reason for every quantity. **Approve and build** starts construction of exactly that plan. About 40 s in, a relay fails on purpose so you can watch traffic reroute.
+Enter **P3 units to build** and **Crew available**, then **Generate plan**, or ask the agent. The number of units is always yours. The planner decides the layout on flat mapped ground, the relays (every unit within 300 m of two), the two gateways, the UWB anchor posts, the fleet and crew, and the schedule. **Plan details** gives the reason for every quantity. **Approve and build** brings up the site mesh and starts construction of exactly that plan.
 
-## What's on screen (construction)
+## Construction: the site mesh
 
-- **Site plan:** P3 units (orange = set, dotted = foundation ready, dashed = planned), robots and machines (teal), people (yellow), relay masts (diamonds), mesh links and relay coverage. Drag to pan, scroll to zoom, click anything to select it.
-- **Freshness:** when the twin stops hearing from an asset, it fades and then turns grey with a "last heard" age. The map always shows the last *reported* position, never a guess.
-- **Expanded view:** details for the selected asset with pause/resume, plus Overview, Machines, People, Network, Requests and Activity tabs.
+Construction runs over the site mesh (`packages/mesh`, mesh spec v0.1). Everything on the map is what the hub mesh service reports.
+
+- **Network:** relays (diamonds) and gateways (squares, wired to the hub) with their links. Shaded circles show each relay's coverage, and the dashed outline is the 3 m band robots may work in.
+- **Robots:** pile drivers and the survey bot. A dotted line runs to the relay a robot is attached to; an orange dashed line means it reaches the mesh through another robot. A red octagon means stopped (needs a resume); an amber ring means holding (clears by itself).
+- **People and machines:** crew and supervisors (yellow) and manual machines (outlined) are positioned from their UWB badges. Unknown objects seen by robot lidar show as red question marks. **Safety circles** shows where robots hold and slow for each of them.
+- **Zones:** hazard zones from the survey and any zones you add.
+- **Progress:** units turn piled when robots report them done over the mesh, and orange when cranes set them.
+- **Packets:** animates traffic moving through the mesh, with a ring for each transmission and a dot for each hop. Click a dot to follow that message through the whole flood.
+- **Sim controls:** run at 1×, 2×, 5× or 10×, and inject failures from spec section 17: relay, gateway or hub down; a robot's radio or RTK lost; a stray vehicle; crew walking into a hazard.
+- **Expanded view:** details for the selected node (resume, stop, out of service), plus Overview, Robots, People, Mesh (relay counters), Tasks (release held items, sign off), Alerts (who was notified, acknowledge) and Activity (the hub's event log).
+
+A remote resume works for lost contact, zone breach, supervisor stop and out of coverage. Near miss, person detected, collision and fault need a supervisor standing at the robot, so the twin explains instead of sending.
 
 ## How it's built
 
@@ -72,13 +81,17 @@ src/
   buildup/
     types.ts         plan (as sent by the edge service)
     overlay.ts       unbuildable-ground image
+  mesh/
+    types.ts         the mesh types (re-exported from packages/mesh, spec section 15)
+    adapter.ts       site frame -> twin coordinates, in one place (spec 12.4)
   twin/
-    types.ts         construction snapshot (as sent by the edge service)
+    types.ts         plan preview snapshot
     freshness.ts     live / lagging / stale
   components/
     SurveyView.tsx / SurveyMap.tsx / SurveyPanel.tsx   survey stage
     BuildupView.tsx / PlanPanel.tsx                    buildup planning
-    ConstructionView.tsx / SiteMap.tsx / StatePanel.tsx construction
+    ConstructionView.tsx / MeshMap.tsx / MeshPanel.tsx  construction over the mesh
+    SiteMap.tsx       plan preview map
     CommandConsole.tsx  chat with the site agent, suggestion cards
     Topbar.tsx, usePanZoom.ts
   App.tsx            stage switching, connection screen

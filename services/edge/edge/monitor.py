@@ -1,21 +1,32 @@
 """Site monitor: cheap rules that decide when something is worth the agent's attention.
 
-Runs after every tick. It never acts; it only collects findings. The server batches the
-findings and, at most every AGENT_MIN_INTERVAL_S, asks the agent whether the build manager
-needs to know (and what it would suggest doing).
+It never acts; it only collects findings. The server batches them and, at most every
+AGENT_MIN_INTERVAL_S, asks the agent whether the build manager needs to know.
+
+During construction the hub mesh service already does the hard part: it raises alerts
+(spec 10.1) and groups losses by cause (7.3). The monitor turns those into findings in plain
+words, and adds a few things the hub doesn't alert on.
 """
 
 from __future__ import annotations
 
-import time
-from collections import defaultdict, deque
-
 from .site import Site
 
-STALE_S = 30
-REQUEST_WAIT_S = 20
-PROXIMITY_WINDOW_S = 120
-PROXIMITY_REPEAT = 3
+ALERT_KINDS = {
+    1: "NODE_LOST",
+    2: "NEAR_MISS",
+    3: "CREW_IN_ZONE",
+    4: "STOP_NEEDS_RESUME",
+    5: "CREW_HOLD_LONG",
+    6: "POSITION_MISMATCH",
+    7: "SHORTFALL",
+    8: "ITEM_FAILED",
+    9: "DUPLICATE_START",
+    10: "MANUAL_TASK",
+    11: "SIGNOFF_NEEDED",
+}
+STOP_REASONS = {1: "lost mesh contact", 2: "near miss", 3: "person detected", 4: "collision", 5: "fault", 6: "zone breach", 7: "supervisor stop", 8: "low battery", 9: "out of coverage", 20: "crew hold", 21: "proximity yield"}
+CAUSES = {0: "unknown cause (coverage hole, power or fault)", 1: "relay down", 2: "hub isolated: both gateways lost"}
 
 
 class Monitor:
@@ -24,12 +35,10 @@ class Monitor:
         self.findings: list[str] = []
         self._survey_phase = site.survey.phase
         self._plan_version = 0
-        self._twin_event_id = 0
-        self._twin_started = False
-        self._stale: set[str] = set()
-        self._prox: dict[str, deque] = defaultdict(deque)
-        self._prox_flagged: dict[str, float] = {}
-        self._req_flagged: set[str] = set()
+        self._alerts_seen: set[int] = set()
+        self._escalated: set[int] = set()
+        self._groups: dict[int, dict] = {}
+        self._tasks_done: set[int] = set()
 
     def take(self) -> list[str]:
         out, self.findings = self.findings, []
@@ -38,7 +47,7 @@ class Monitor:
     def check(self) -> None:
         self._check_survey()
         self._check_plan()
-        self._check_twin()
+        self._check_tasks()
 
     # ---------- survey ----------
 
@@ -72,51 +81,53 @@ class Monitor:
             f"{p['totalDays']:g} days, bottleneck {p['bottleneck']}.{warn}"
         )
 
-    # ---------- construction ----------
+    # ---------- construction (mesh) ----------
 
-    def _check_twin(self) -> None:
-        sim = self.site.sim
-        if not sim:
+    def _check_tasks(self) -> None:
+        planning = self.site.mesh.planning
+        if not planning:
             return
-        now = time.time()
-        if not self._twin_started:
-            self._twin_started = True
-            self._twin_event_id = sim.events[0]["id"] if sim.events else 0
-            return
-        new = [e for e in sim.events if e["id"] > self._twin_event_id]
-        if new:
-            self._twin_event_id = new[0]["id"]
-        for e in reversed(new):
-            text = e["text"]
-            if e["level"] == "alert":
-                self.findings.append(text)
-            elif "refusal" in text:
-                self.findings.append(text)
-            elif text.startswith("Rerouted around"):
-                self.findings.append(text)
-            elif text.startswith("All ") and "Construction complete" in text:
-                self.findings.append(text)
-            elif text.startswith("Proximity stop:") and e.get("assetId"):
-                q = self._prox[e["assetId"]]
-                q.append(now)
-                while q and now - q[0] > PROXIMITY_WINDOW_S:
-                    q.popleft()
-                if len(q) >= PROXIMITY_REPEAT and now - self._prox_flagged.get(e["assetId"], 0) > PROXIMITY_WINDOW_S:
-                    self._prox_flagged[e["assetId"]] = now
-                    self.findings.append(f"{e['assetId']} has had {len(q)} proximity stops in the last {PROXIMITY_WINDOW_S // 60} minutes (latest: {text[len('Proximity stop: '):]}). Crews may be working too close to it.")
+        for t in planning.get("tasks", []):
+            if t["status"] == "complete" and t["taskId"] not in self._tasks_done:
+                self._tasks_done.add(t["taskId"])
+                self.findings.append(f"{t['label']} is complete.")
 
-        now_ms = now * 1000
-        for a in sim.reported.values():
-            if a["kind"] == "relay":
-                continue
-            stale = now_ms - a["lastHeard"] > STALE_S * 1000
-            if stale and a["id"] not in self._stale:
-                self._stale.add(a["id"])
-                self.findings.append(f"{a['name']} ({a['role']}) hasn't reported for over {STALE_S} s; last seen doing: {a['task']}.")
-            elif not stale and a["id"] in self._stale:
-                self._stale.discard(a["id"])
+    def mesh_events(self, events: list[dict]) -> None:
+        name = self.site.name_of
+        for e in events:
+            kind = e.get("kind")
+            if kind == "node_lost":
+                self._groups[e["groupId"]] = e
+            elif kind == "alert":
+                a = e["alert"]
+                aid = a["alertId"]
+                k = ALERT_KINDS.get(a["kind"], str(a["kind"]))
+                if aid not in self._alerts_seen:
+                    self._alerts_seen.add(aid)
+                    if k == "MANUAL_TASK":
+                        continue
+                    self.findings.append(self._describe(a, k, name))
+                elif not a.get("ack") and len(a.get("notified", [])) > 1 and aid not in self._escalated:
+                    self._escalated.add(aid)
+                    who = name(a["notified"][-2])
+                    self.findings.append(f"Alert {aid} ({k}) wasn't acknowledged by {who}; the hub escalated it to {name(a['notified'][-1])}.")
 
-        for r in sim.requests:
-            if r["status"] == "pending" and r["id"] not in self._req_flagged and now_ms - r["createdAt"] > REQUEST_WAIT_S * 1000:
-                self._req_flagged.add(r["id"])
-                self.findings.append(f"{r['id']} ({r['need']} at {r['target']['label']}) has been waiting {REQUEST_WAIT_S} s with nothing assigned.")
+    def _describe(self, a: dict, k: str, name) -> str:
+        subjects = ", ".join(name(s) for s in a.get("subjects", [])) or "-"
+        if k == "NODE_LOST":
+            g = self._groups.get(a["ref"], {})
+            cause = CAUSES.get(g.get("cause", 0), "unknown")
+            cn = f" ({name(g['causeNode'])})" if g.get("causeNode") else ""
+            return f"Alert {a['alertId']}: NODE_LOST, cause {cause}{cn}: {subjects}."
+        if k == "STOP_NEEDS_RESUME":
+            robot = a["subjects"][0] if a.get("subjects") else ""
+            state = self.site._robot_state(robot)
+            reason = STOP_REASONS.get(state.get("stopReason", 0), "unknown reason")
+            return f"Alert {a['alertId']}: {name(robot)} stopped ({reason}) and needs a RESUME (stop {a['ref']})."
+        if k == "SHORTFALL":
+            return f"Alert {a['alertId']}: SHORTFALL on task {a['taskId']}: {a['ref']} more robot(s) could be working it."
+        if k == "SIGNOFF_NEEDED":
+            return f"Alert {a['alertId']}: task {a['taskId']} item {a['itemId']} is waiting for a supervisor sign-off."
+        if k == "CREW_IN_ZONE":
+            return f"Alert {a['alertId']}: {subjects} entered a crew keep-out zone (zone {a['ref']})."
+        return f"Alert {a['alertId']}: {k} ({subjects})."

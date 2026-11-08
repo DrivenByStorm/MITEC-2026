@@ -3,7 +3,9 @@
 One WebSocket (/ws) carries everything. Server -> client messages:
     hello    terrain (heights), network ranges, stage, plan, chat history, agent status, actions
     survey   survey snapshot (+ packed coverage bits when new ground was mapped)
-    twin     construction snapshot
+    twin     construction: the hub mesh service's snapshot (spec 12.1), planning progress, sim status
+    meshEvents / traces / meshLog   the mesh event stream, packet traces (12.2) and sim notes
+    meshConfig  benchmark and node names for the UI's coordinate adapter (12.4)
     plan     buildup plan + preview snapshot
     stage    furthest stage reached
     chat     one chat message (new or updated, keyed by id)
@@ -33,14 +35,12 @@ from .agent import NO_UPDATE, SiteAgent
 from .monitor import Monitor
 from .site import ACTIONS, ActionError, Site
 from .survey.session import TICK_S as SURVEY_TICK_S
-from .twin.simulator import TICK_S as TWIN_TICK_S
 
 log = logging.getLogger("edge")
 
 AGENT_MIN_INTERVAL_S = float(os.environ.get("AGENT_MIN_INTERVAL_S", "20"))
 AGENT_PROACTIVE = os.environ.get("AGENT_PROACTIVE", "1") != "0"
 SURVEY_EVENTS = 60
-TWIN_EVENTS = 80
 CHAT_LIMIT = 300
 
 
@@ -50,7 +50,9 @@ def now_ms() -> int:
 
 class EdgeApp:
     def __init__(self, site: Site | None = None, agent_client=None):
-        self.site = site or Site()
+        self.site = site or Site(mesh_handler=self._on_mesh)
+        if site is not None:
+            site.mesh.on_message = self._on_mesh
         self.monitor = Monitor(self.site)
         self.agent = SiteAgent(self.site, self._propose, client=agent_client)
         self.clients: set[WebSocket] = set()
@@ -69,7 +71,7 @@ class EdgeApp:
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._twin_loop()), asyncio.create_task(self._agent_loop())]
+        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._agent_loop())]
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -77,6 +79,7 @@ class EdgeApp:
         for t in self._tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await t
+        await self.site.mesh.close()
 
     # ---------- loops ----------
 
@@ -92,13 +95,19 @@ class EdgeApp:
                 await self._broadcast_survey()
             await self._broadcast_changes()
 
-    async def _twin_loop(self) -> None:
-        while True:
-            await asyncio.sleep(TWIN_TICK_S)
-            if self.site.sim:
-                self.site.tick_twin()
-                self.monitor.check()
-                await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
+    async def _on_mesh(self, msg: dict) -> None:
+        """Messages from the mesh simulator (the hub mesh service's twin interface)."""
+        kind = msg.get("type")
+        if kind == "snapshot":
+            self.monitor.check()
+            await self._broadcast({"type": "twin", "mesh": msg["mesh"], "planning": msg["planning"], "status": msg["status"], "hubLog": msg.get("hubLog", [])[-60:]})
+        elif kind == "events":
+            self.monitor.mesh_events(msg["events"])
+            await self._broadcast({"type": "meshEvents", "events": msg["events"]})
+        elif kind == "traces":
+            await self._broadcast({"type": "traces", "traces": msg["traces"]})
+        elif kind == "log":
+            await self._broadcast({"type": "meshLog", "lines": msg["lines"]})
 
     async def _agent_loop(self) -> None:
         while True:
@@ -121,12 +130,11 @@ class EdgeApp:
         snap["events"] = snap["events"][:SURVEY_EVENTS]
         return snap
 
-    def _twin_snapshot(self) -> dict | None:
-        if not self.site.sim:
+    def _twin_msg(self) -> dict | None:
+        m = self.site.mesh
+        if not self.site.construction or not m.snapshot:
             return None
-        snap = self.site.sim.snapshot()
-        snap["events"] = snap["events"][:TWIN_EVENTS]
-        return snap
+        return {"mesh": m.snapshot, "planning": m.planning, "status": m.status, "hubLog": m.hub_log[-60:]}
 
     def _plan_msg(self) -> dict:
         return {"type": "plan", "plan": self.site.plan, "preview": self.site.preview, "version": self.site.plan_version}
@@ -146,7 +154,8 @@ class EdgeApp:
             "plan": self.site.plan,
             "preview": self.site.preview,
             "planVersion": self.site.plan_version,
-            "twin": self._twin_snapshot(),
+            "twin": self._twin_msg(),
+            "meshConfig": self.site.mesh_config(),
             "chat": self.chat,
             "agent": self._agent_msg(),
         }
@@ -165,10 +174,10 @@ class EdgeApp:
             await self._broadcast(self._plan_msg())
         if self.site.stage != self._stage_sent:
             self._stage_sent = self.site.stage
+            if self.site.stage == "construction":
+                await self._broadcast({"type": "meshConfig", "config": self.site.mesh_config()})
             await self._broadcast({"type": "stage", "stage": self.site.stage})
             await self._expire_suggestions()
-            if self.site.stage == "construction":
-                await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
 
     async def _broadcast(self, msg: dict) -> None:
         if not self.clients:
@@ -245,9 +254,9 @@ class EdgeApp:
 
     async def _handle_action(self, ws: WebSocket, msg: dict) -> None:
         name, args = str(msg.get("name")), msg.get("args") or {}
-        quiet = name == "survey.setDistance"  # slider drags shouldn't flood the chat
+        quiet = name in ("survey.setDistance", "sim.speed", "mesh.trace")  # controls that shouldn't flood the chat
         try:
-            text = self.site.run_action(name, args)
+            text = await self.site.run_action(name, args)
             ok = True
         except ActionError as e:
             text, ok = str(e), False
@@ -269,7 +278,7 @@ class EdgeApp:
             self.agent.note(f"Dismissed your suggestion: {card['label']}.")
             return
         try:
-            card["result"] = self.site.run_action(card["action"], card["args"])
+            card["result"] = await self.site.run_action(card["action"], card["args"])
             card["status"] = "approved"
             self.agent.note(f"Approved your suggestion: {card['label']}. Result: {card['result']}")
         except ActionError as e:
@@ -292,10 +301,9 @@ class EdgeApp:
                 await self._update(m)
 
     async def _after_change(self) -> None:
-        await self._broadcast_survey()
+        if self.site.stage != "construction":
+            await self._broadcast_survey()
         await self._broadcast_changes()
-        if self.site.sim:
-            await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
 
 
 def _json_default(o):

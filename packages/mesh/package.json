@@ -1,0 +1,21 @@
+{
+  "name": "@site/mesh",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Site mesh simulator and hub mesh service (mesh spec v0.1)",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "~5.9.3"
+  }
+}
