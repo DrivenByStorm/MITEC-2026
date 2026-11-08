@@ -196,7 +196,9 @@ class SiteAgent:
                 try:
                     from anthropic import AsyncAnthropic
 
-                    self._client = AsyncAnthropic()
+                    ws = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+                    # Keys that work across several workspaces must name one on every request.
+                    self._client = AsyncAnthropic(default_headers={"anthropic-workspace-id": ws} if ws else None)
                 except Exception as e:  # pragma: no cover
                     self._client_error = f"The site agent couldn't start: {e}"
 
@@ -261,6 +263,7 @@ class SiteAgent:
             log.warning("agent call failed: %s", e)
             del self.history[start:]  # drop the unfinished turn so the history stays valid
             result["text"] = _friendly_error(e)
+            result["error"] = True
             return result
 
     # ---------- tools ----------
@@ -548,15 +551,35 @@ def _tool_label(name: str, args: dict) -> str:
     }.get(name, name)
 
 
+def _api_message(e: Exception) -> str:
+    """Anthropic's own explanation of a failed request (never contains the key)."""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") if isinstance(body.get("error"), dict) else body
+        msg = err.get("message") if isinstance(err, dict) else None
+        if msg:
+            return str(msg)
+    return str(e)[:300]
+
+
 def _friendly_error(e: Exception) -> str:
     name = type(e).__name__
+    status = getattr(e, "status_code", None)
+    detail = _api_message(e)
+    low = detail.lower()
     if "Connection" in name or "Timeout" in name:
         return "I can't reach Claude right now (is the satellite uplink down?). The site keeps running; the map buttons still work."
     if "Authentication" in name:
-        return "The Anthropic API key on the edge service was rejected. Check ANTHROPIC_API_KEY in services/edge/.env."
+        return f"The Anthropic API key on the edge service was rejected ({detail}). Check ANTHROPIC_API_KEY in services/edge/.env."
     if "RateLimit" in name:
         return "Claude is rate-limiting requests right now. Try again in a minute."
-    return f"The site agent hit an error ({name}). Try again."
+    if "credit balance" in low or "billing" in low:
+        return f"The Anthropic account has no usable credit: {detail} Add credits or billing in the Claude Console (platform.claude.com), then restart the edge service."
+    if "workspace" in low:
+        return f"Anthropic needs a workspace for this key: {detail} Put ANTHROPIC_WORKSPACE_ID=wrkspc_... in services/edge/.env and restart the edge service."
+    if "model" in low:
+        return f"Anthropic didn't accept the model: {detail} Set ANTHROPIC_MODEL in services/edge/.env to a model your workspace can use."
+    return f"The site agent hit an error ({name}{f' {status}' if status else ''}): {detail}"
 
 
 def _json_default(o):

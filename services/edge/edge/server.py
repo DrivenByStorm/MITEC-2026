@@ -64,6 +64,7 @@ class EdgeApp:
         self._agent_busy = False
         self._agent_activity = ""
         self._last_proactive = 0.0
+        self._last_agent_error: str | None = None
         self._pending_findings: list[str] = []
         self._coverage_sent = -1
         self._plan_sent = 0
@@ -242,6 +243,13 @@ class EdgeApp:
             reply = res["text"].strip()
             if proactive and not res["proposals"] and (not reply or reply.startswith(NO_UPDATE)):
                 return
+            if res.get("error"):
+                # Unprompted checks retry every few seconds: say a given error once, not every time.
+                if proactive and reply == self._last_agent_error:
+                    return
+                self._last_agent_error = reply
+            else:
+                self._last_agent_error = None
             if reply.startswith(NO_UPDATE):
                 reply = reply[len(NO_UPDATE):].strip()
             await self._post(
