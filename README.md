@@ -1,5 +1,4 @@
 # MITEC-2026
-Two twos
 
 ## Exowatt challenge: off-grid build-site digital twin
 
@@ -163,13 +162,5 @@ Required inputs include a site map, task definitions, robot API access and times
 | 10% less coordination waiting | A proposed comparison against an equivalent manual baseline |
 
 None of these targets has been demonstrated by the supplied results. Keep the emulator's behavior, production design and measured evidence clearly identified as the project develops.
-
-## Project documents
-
-- [Submission deck](https://chatgpt.com/library?file_id=libfile_97704313494c81918e5ca4cd14211d4d&account_id=personal) and [submission PDF](https://chatgpt.com/library?file_id=libfile_09b25c1c92c48191a65639316ee0135b&account_id=personal): ten main slides and one appendix.
-- [Mesh network and digital twin summary](https://chatgpt.com/library?file_id=libfile_a273ca0b83688191a647727fbd008528&account_id=personal): current emulator behavior and acceptance checks.
-- [Distributed CBAA guide](https://chatgpt.com/library?file_id=libfile_59f7bd102f3c8191863b9a3c39c6fcc3&account_id=personal): proposed deployment allocation and registry behavior.
-- [Mesh packet design v1](https://chatgpt.com/library?file_id=libfile_0911fa9afaf88191b2d42ec3ba8fe90f&account_id=personal): proposed binary packet layout, security and transport considerations.
-- [Editable initial-plan diagram](https://chatgpt.com/library?file_id=libfile_a848a9bedea4819181727df1cc7b3a07&account_id=personal): recreation of the original architecture sketch. Use the newer documents above for the emulator and production allocation rules.
 
 
