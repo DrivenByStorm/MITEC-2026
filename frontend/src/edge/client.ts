@@ -9,6 +9,7 @@ import type { SurveySnapshot } from '../survey/types'
 import type { TwinSnapshot } from '../twin/types'
 import type { SitePlan } from '../buildup/types'
 import type { Pt } from '../survey/types'
+import type { PacketHop } from '../mesh/types'
 
 export type Stage = 'survey' | 'buildup' | 'construction'
 
@@ -26,6 +27,15 @@ export type ActionName =
   | 'twin.pauseAll'
   | 'twin.request'
   | 'twin.cancelRequest'
+  | 'task.cancel'
+  | 'task.release'
+  | 'task.priority'
+  | 'mesh.cutLink'
+  | 'mesh.restoreLink'
+  | 'mesh.relay'
+  | 'mesh.hub'
+  | 'mesh.latency'
+  | 'mesh.loss'
 
 export type Act = (name: ActionName, args?: Record<string, unknown>) => Promise<ActionResult>
 
@@ -88,7 +98,7 @@ export interface EdgeState {
   /** Furthest stage the site has reached. */
   stage: Stage
   terrain: TerrainInfo | null
-  network: { relayRangeM: number; assetRangeM: number; loraRangeM: number }
+  network: { relayRangeM: number; assetRangeM: number; loraRangeM: number; robotRangeM: number }
   survey: SurveySnapshot | null
   coverageVersion: number
   plan: SitePlan | null
@@ -125,6 +135,17 @@ class EdgeClient {
   /** 1 where the drones have mapped the ground (mutated in place; watch coverageVersion). */
   coverage = new Uint8Array(0)
 
+  /** Recent mesh packet hops for the animation. Kept outside React state: it changes 5x a second. */
+  traces: PacketHop[] = []
+  private traceListeners = new Set<() => void>()
+
+  onTraces = (l: () => void) => {
+    this.traceListeners.add(l)
+    return () => {
+      this.traceListeners.delete(l)
+    }
+  }
+
   private state: EdgeState
   private ws: WebSocket | null = null
   private listeners = new Set<() => void>()
@@ -139,7 +160,7 @@ class EdgeClient {
       ready: false,
       stage: 'survey',
       terrain: null,
-      network: { relayRangeM: 460, assetRangeM: 270, loraRangeM: 2000 },
+      network: { relayRangeM: 460, assetRangeM: 270, loraRangeM: 2000, robotRangeM: 120 },
       survey: null,
       coverageVersion: -1,
       plan: null,
@@ -229,6 +250,23 @@ class EdgeClient {
     for (const l of this.listeners) l()
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private addTraces(m: any) {
+    // Mesh times are seconds on the edge service's mesh clock; place them on our own clock.
+    const now = Date.now()
+    const toLocal = (t: number) => now + (t - m.meshNow) * 1000
+    const byId = new Map(this.traces.map((t, i) => [t.id, i]))
+    for (const r of m.traces) {
+      const hop: PacketHop = { ...r, t0: toLocal(r.t0), t1: toLocal(r.t1) }
+      const i = byId.get(r.id)
+      if (r.update && i !== undefined) this.traces[i] = { ...this.traces[i], result: r.result }
+      else if (!r.update) this.traces.push(hop)
+    }
+    const cutoff = now - 4000
+    if (this.traces.length > 3000 || (this.traces[0] && this.traces[0].t1 < cutoff)) this.traces = this.traces.filter((t) => t.t1 >= cutoff).slice(-3000)
+    for (const l of this.traceListeners) l()
+  }
+
   private applyCoverage(cov?: { version: number; bits: string }) {
     if (!cov || cov.version === this.state.coverageVersion) return {}
     const packed = b64ToBytes(cov.bits)
@@ -268,6 +306,8 @@ class EdgeClient {
         return this.set({ survey: m.snapshot, ...this.applyCoverage(m.coverage) })
       case 'twin':
         return this.set({ twin: m.snapshot ?? null })
+      case 'traces':
+        return this.addTraces(m)
       case 'plan':
         return this.set({ plan: m.plan ?? null, preview: m.preview ?? null, planVersion: m.version })
       case 'stage':

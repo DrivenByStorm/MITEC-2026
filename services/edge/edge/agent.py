@@ -18,7 +18,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from .site import ACTIONS, ActionError, Site
-from .twin.network import ASSET_RANGE_M, RELAY_RANGE_M
+from .twin.network import ASSET_RANGE_M, RELAY_RANGE_M, ROBOT_RANGE_M
 
 log = logging.getLogger("edge.agent")
 
@@ -44,6 +44,19 @@ The twin moves through three stages:
    a relay within {ASSET_RANGE_M} m; relays mesh within {RELAY_RANGE_M} m. The plan gives every work area two relays, \
    so one relay failing should not cut anything off. Assets out of coverage go stale on the map but keep working and \
    sync when they reconnect. Workers are W-nn with names like "J. Ortiz". Unit ids look like B-04-12 (block B, row 4, slot 12).
+
+The site mesh (construction): the autonomous robots (pile drivers RPD-n, layout rovers LR-n, drone DR-1), the relay masts, \
+the gateway GW and the hub (HUB, the edge server, wired to GW) are mesh nodes. Robots link to each other within {ROBOT_RANGE_M} m \
+and to relays within {ASSET_RANGE_M} m; packets are forwarded hop by hop. The hub introduces row tasks: "Stake row A-03" (rovers), \
+then "Pile row A-03" (pile drivers), then "Check row A-03" (rovers), and "Survey block A" (drone) once a block is piled. \
+Allocation is EMULATED bidding and consensus: the hub announces one task per round with a fixed set of participants (every robot). \
+Each robot sends one frozen bid (or a decline), waits for a bid or decline from every participant (silence isn't a decline), picks \
+the highest score (ties to the lowest robot ID) and sends AGREE with a fingerprint of the bid set. The tentative winner commits only \
+after matching AGREEs from every participant, then starts work. Neither the hub nor you pick winners. A missing response leaves the \
+round pending ("stalled" after a while); the hub never shrinks the participant set. After commitment, a robot that goes quiet is \
+shown as "owner uncertain" but keeps the task until it reports it stopped or released. Manual machines (cranes, telehandlers, \
+trenchers) are not mesh robots and don't bid. You are a hub-side helper: you can suggest hub actions (cancel, release or reprioritise \
+a task; cut or restore a link; take a relay down or up; switch the hub off or on; change delay or loss), never a winner.
 
 How you work:
 - You are SUGGEST-ONLY. You cannot change anything on site. To suggest a change, call propose_action; it appears in the \
@@ -111,6 +124,27 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_tasks",
+        "description": "Mesh tasks as the hub sees them (state, owner, progress, rounds). Filter by state or text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "enum": ["waiting", "queued", "announced", "bidding", "awaiting", "assigned", "in_progress", "completed", "no_eligible", "release_requested", "cancel_requested", "cancelled", "active"]},
+                "contains": {"type": "string", "description": "Only tasks whose label contains this, e.g. 'A-03' or 'pile'."},
+            },
+        },
+    },
+    {
+        "name": "get_round",
+        "description": "One allocation round in detail: participants, each bid or decline the hub received, each robot's proposed winner, the tentative winner's count of matching agreements, the commit and whether it's stalled. Omit roundId for the current or latest round.",
+        "input_schema": {"type": "object", "properties": {"roundId": {"type": "integer"}}},
+    },
+    {
+        "name": "get_mesh_status",
+        "description": "Mesh health: nodes up/down and whether they reach the hub, removed links, delay and loss settings, hub on/off, each robot's availability, assignment, last heartbeat, and packet counters.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "list_requests",
         "description": "Equipment requests during construction (pending, en-route, arrived, done, cancelled).",
         "input_schema": {"type": "object", "properties": {}},
@@ -165,6 +199,8 @@ class SiteAgent:
 
     def note(self, text: str) -> None:
         """Something the manager did directly; the agent sees it with its next message."""
+        key = text.split(" to ")[0]
+        self.pending_notes = [n for n in self.pending_notes if n.split(" to ")[0] != key or not key.startswith("Set ")]
         self.pending_notes.append(text)
         del self.pending_notes[:-12]
 
@@ -270,6 +306,18 @@ class SiteAgent:
                 "openRequests": [r["id"] for r in snap["requests"] if r["status"] not in ("done", "cancelled")],
                 "uplink": "up" if snap["uplink"]["online"] else "down",
                 "minutesElapsed": round(site.sim.tick_count / 60, 1),
+            }
+        if site.mesh:
+            m = site.mesh.snapshot()
+            cur = next((r for r in m["rounds"] if r["status"] == "open"), None)
+            out["mesh"] = {
+                "allocation": m["mode"],
+                "hub": "on" if m["hub"]["online"] else "off",
+                "tasks": m["counts"],
+                "currentRound": {"id": cur["id"], "task": cur["taskId"], "stalled": cur["stalled"], "ageS": cur["ageS"]} if cur else None,
+                "uncertainOwners": [t["owner"] + " on " + t["label"] for t in m["tasks"] if t["uncertain"]],
+                "removedLinks": ["–".join(c) for c in m["cut"]],
+                "nodesNotReachingHub": [n["id"] for n in m["nodes"] if not n["reachesHub"] and n["kind"] != "hub"],
             }
         return out
 
@@ -387,6 +435,50 @@ class SiteAgent:
         now = time.time() * 1000
         return [{"secondsAgo": round((now - e["at"]) / 1000), "level": e["level"], "text": e["text"]} for e in out[: int(args.get("limit") or 15)]]
 
+    def _tool_get_tasks(self, args, result):
+        m = self.site.mesh
+        if not m:
+            return {"note": "Construction hasn't started; no mesh tasks yet."}
+        snap = m.snapshot()
+        st, txt = args.get("state"), str(args.get("contains") or "").lower()
+        active = ("announced", "bidding", "awaiting", "assigned", "in_progress", "release_requested", "cancel_requested", "no_eligible")
+        items = [t for t in snap["tasks"] if (not st or t["state"] == st or (st == "active" and t["state"] in active)) and (not txt or txt in t["label"].lower())]
+        keep = ("id", "label", "stateLabel", "owner", "done", "total", "priority", "revision", "rounds", "uncertain")
+        return {"counts": snap["counts"], "count": len(items), "tasks": [{k: t[k] for k in keep} for t in items[:40]], "truncated": len(items) > 40}
+
+    def _tool_get_round(self, args, result):
+        m = self.site.mesh
+        if not m or not m.hub.rounds:
+            return {"note": "No allocation rounds yet."}
+        rid = args.get("roundId") or m.hub.current or max(m.hub.rounds)
+        d = m.round_detail(int(rid))
+        if not d:
+            return {"error": f"No round {rid}."}
+        t = m.hub.tasks[d["taskId"]]
+        d["task"] = t["label"]
+        wv = m._with_winner_view(m.hub.round_view(m.hub.rounds[int(rid)]))
+        d["tentative"] = wv["tentative"]
+        d["proposedByRobot"] = wv["proposedByRobot"]
+        if d.get("consensus"):
+            d["consensus"] = {k: d["consensus"][k] for k in ("assignmentId", "owner", "at")} | {"fingerprint": d["consensus"]["evidence"]["fingerprint"]}
+        return d
+
+    def _tool_get_mesh_status(self, args, result):
+        m = self.site.mesh
+        if not m:
+            return {"note": "Construction hasn't started; the mesh comes up with the robots."}
+        snap = m.snapshot()
+        return {
+            "hub": snap["hub"],
+            "config": snap["config"],
+            "nodes": [{k: n[k] for k in ("id", "kind", "up", "reachesHub")} for n in snap["nodes"]],
+            "removedLinks": snap["cut"],
+            "links": len(snap["links"]),
+            "robots": [{"id": r["id"], "available": r["available"], "assignment": r["assignment"], "openRounds": len(r["openRounds"]),
+                        "lastHeartbeatSecondsAgo": snap["heard"].get(r["id"], {}).get("ago")} for r in snap["robots"]],
+            "packets": snap["stats"],
+        }
+
     def _tool_list_requests(self, args, result):
         sim = self.site.sim
         if not sim:
@@ -423,6 +515,9 @@ def _tool_label(name: str, args: dict) -> str:
         "get_network_status": "Checked the relay network",
         "get_recent_events": "Read the site log",
         "list_requests": "Checked equipment requests",
+        "get_tasks": "Checked mesh tasks" + (f" ({', '.join(str(v) for v in args.values())})" if args else ""),
+        "get_round": f"Looked at round {args['roundId']}" if args.get("roundId") else "Looked at the current round",
+        "get_mesh_status": "Checked the mesh",
         "propose_action": f"Suggested: {args.get('action', '')}",
     }.get(name, name)
 

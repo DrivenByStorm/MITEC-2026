@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 
+from .mesh.rules import ALLOC
 from .site import Site
 
 STALE_S = 30
@@ -30,6 +31,8 @@ class Monitor:
         self._prox: dict[str, deque] = defaultdict(deque)
         self._prox_flagged: dict[str, float] = {}
         self._req_flagged: set[str] = set()
+        self._stalled_flagged: set[int] = set()
+        self._uncertain: set[str] = set()
 
     def take(self) -> list[str]:
         out, self.findings = self.findings, []
@@ -94,6 +97,8 @@ class Monitor:
                 self.findings.append(text)
             elif text.startswith("Rerouted around"):
                 self.findings.append(text)
+            elif "attempt cancelled" in text:
+                self.findings.append(text)
             elif text.startswith("All ") and "Construction complete" in text:
                 self.findings.append(text)
             elif text.startswith("Proximity stop:") and e.get("assetId"):
@@ -115,6 +120,27 @@ class Monitor:
                 self.findings.append(f"{a['name']} ({a['role']}) hasn't reported for over {STALE_S} s; last seen doing: {a['task']}.")
             elif not stale and a["id"] in self._stale:
                 self._stale.discard(a["id"])
+
+        mesh = self.site.mesh
+        if mesh:
+            hub = mesh.hub
+            for rnd in hub.rounds.values():
+                rv = hub.round_view(rnd)
+                if rv["stalled"] and rnd["id"] not in self._stalled_flagged:
+                    self._stalled_flagged.add(rnd["id"])
+                    t = hub.tasks[rnd["taskId"]]
+                    missing = [p for p in rnd["participants"] if p not in rnd["bids"]]
+                    self.findings.append(
+                        f"Agreement stalled: round {rnd['id']} for {t['label']} has been open {round(rv['ageS'])} s. "
+                        f"Hub has bids from {len(rnd['bids'])} of {len(rnd['participants'])} robots" + (f" (missing {', '.join(missing)})" if missing else "") + "."
+                    )
+            for t in hub.tasks.values():
+                unc = hub.owner_uncertain(t)
+                if unc and t["id"] not in self._uncertain:
+                    self._uncertain.add(t["id"])
+                    self.findings.append(f"Owner uncertain: {t['owner']} hasn't been heard on the mesh for over {round(ALLOC['uncertainS'])} s while it holds {t['label']} ({t['done']} of {t['total']} done). The task stays assigned to it.")
+                elif not unc and t["id"] in self._uncertain:
+                    self._uncertain.discard(t["id"])
 
         for r in sim.requests:
             if r["status"] == "pending" and r["id"] not in self._req_flagged and now_ms - r["createdAt"] > REQUEST_WAIT_S * 1000:

@@ -2,29 +2,43 @@ import { useState } from 'react'
 import type { Asset, AssetRequest, TwinSnapshot } from '../twin/types'
 import { ageSeconds, formatAge, freshness } from '../twin/freshness'
 import type { Act } from '../edge/client'
+import { MeshTab, NodeMesh, RobotMesh, TasksTab } from './MeshPanels'
 
 interface Props {
   snapshot: TwinSnapshot
   selectedId?: string
   onSelect: (id: string | undefined) => void
   act: Act
+  selectedTask?: string
+  onSelectTask?: (id: string | undefined) => void
+  tab?: Tab
+  onTab?: (t: Tab) => void
 }
 
-const TABS = ['Overview', 'Machines', 'People', 'Network', 'Requests', 'Activity'] as const
-type Tab = (typeof TABS)[number]
+const TABS = ['Overview', 'Tasks', 'Mesh', 'Machines', 'People', 'Network', 'Requests', 'Activity'] as const
+export type Tab = (typeof TABS)[number]
 
-export function StatePanel({ snapshot, selectedId, onSelect, act }: Props) {
-  const [tab, setTab] = useState<Tab>('Overview')
+export function StatePanel({ snapshot, selectedId, onSelect, act, selectedTask, onSelectTask, tab: tabProp, onTab }: Props) {
+  const [ownTab, setOwnTab] = useState<Tab>('Overview')
+  const tab = tabProp ?? ownTab
+  const setTab = onTab ?? setOwnTab
   const selected = snapshot.assets.find((a) => a.id === selectedId)
+  const mesh = snapshot.mesh
+  const tabs = TABS.filter((t) => mesh || (t !== 'Tasks' && t !== 'Mesh'))
+  const selectTask = (id: string | undefined) => {
+    onSelectTask?.(id)
+    if (id) setTab('Tasks')
+  }
 
   return (
     <aside className="panel" aria-label="Live site state">
-      {selected && <AssetDetail asset={selected} snapshot={snapshot} onClose={() => onSelect(undefined)} act={act} />}
+      {selected && <AssetDetail asset={selected} snapshot={snapshot} onClose={() => onSelect(undefined)} act={act} onSelect={onSelect} onSelectTask={selectTask} />}
 
       <div className="tabs" role="tablist" aria-label="Site state views">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button key={t} role="tab" type="button" aria-selected={tab === t} className="tab" onClick={() => setTab(t)}>
             {t}
+            {t === 'Tasks' && mesh && <Count n={mesh.tasks.filter((x) => x.uncertain || mesh.rounds.some((r) => r.stalled && r.taskId === x.id)).length} alert />}
             {t === 'Requests' && <Count n={snapshot.requests.filter((r) => !['done', 'cancelled'].includes(r.status)).length} />}
             {t === 'Network' && <Count n={snapshot.assets.filter((a) => a.kind === 'relay' && relayDown(a, snapshot.now)).length} alert />}
           </button>
@@ -33,6 +47,8 @@ export function StatePanel({ snapshot, selectedId, onSelect, act }: Props) {
 
       <div className="panel__body" role="tabpanel">
         {tab === 'Overview' && <Overview snapshot={snapshot} onSelect={onSelect} />}
+        {tab === 'Tasks' && mesh && <TasksTab mesh={mesh} selectedTask={selectedTask} onSelectTask={selectTask} onSelectAsset={onSelect} act={act} />}
+        {tab === 'Mesh' && mesh && <MeshTab mesh={mesh} onSelectAsset={onSelect} act={act} />}
         {tab === 'Machines' && (
           <AssetTable
             assets={snapshot.assets.filter((a) => a.kind === 'robot' || a.kind === 'machine' || a.kind === 'drone')}
@@ -81,8 +97,10 @@ function Meter({ value, label }: { value: number; label: string }) {
   )
 }
 
-function AssetDetail({ asset: a, snapshot, onClose, act }: { asset: Asset; snapshot: TwinSnapshot; onClose: () => void; act: Act }) {
+function AssetDetail({ asset: a, snapshot, onClose, act, onSelect, onSelectTask }: { asset: Asset; snapshot: TwinSnapshot; onClose: () => void; act: Act; onSelect: (id: string) => void; onSelectTask: (id: string) => void }) {
   const machine = a.kind === 'robot' || a.kind === 'machine' || a.kind === 'drone'
+  const mesh = snapshot.mesh
+  const robotView = mesh?.robots.find((r) => r.id === a.id)
   return (
     <section className="detail" aria-label={`${a.name} details`}>
       <div className="detail__head">
@@ -119,6 +137,9 @@ function AssetDetail({ asset: a, snapshot, onClose, act }: { asset: Asset; snaps
           )}
         </div>
       )}
+      {mesh && robotView && <RobotMesh mesh={mesh} robot={robotView} onSelectTask={onSelectTask} onSelectAsset={onSelect} act={act} />}
+      {mesh && a.kind === 'relay' && <NodeMesh mesh={mesh} id={a.id} onSelectAsset={onSelect} act={act} />}
+      {machine && mesh && !robotView && a.kind !== 'worker' && <p className="hint">Manual machine: tracked, but not a mesh robot and doesn't bid for tasks.</p>}
     </section>
   )
 }

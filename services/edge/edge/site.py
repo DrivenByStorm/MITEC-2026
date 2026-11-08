@@ -19,7 +19,8 @@ from .buildup.assumptions import ASSUMPTIONS
 from .buildup.planner import PlannerContext, plan_site
 from .survey.selection import SelectionAlgorithm, load_selection
 from .survey.session import SurveySession
-from .twin.network import ASSET_RANGE_M, LORA_RANGE_M, RELAY_RANGE_M
+from .mesh.site_mesh import SiteMesh
+from .twin.network import ASSET_RANGE_M, LORA_RANGE_M, RELAY_RANGE_M, ROBOT_RANGE_M
 from .twin.simulator import SimulatedSite, plan_preview
 
 
@@ -42,6 +43,15 @@ ACTIONS: dict[str, tuple[str, str, dict]] = {
     "twin.pauseAll": ("construction", "Pause every robot and drone on site.", {}),
     "twin.request": ("construction", "Request equipment at a place: need is 'telehandler', 'crane' or 'trencher'; target is a unit (C-03-07), block and row (B7), block (block B), 'laydown', 'office' or an asset name.", {"need": "string", "target": "string"}),
     "twin.cancelRequest": ("construction", "Cancel an open equipment request (e.g. REQ-001).", {"id": "string"}),
+    "task.cancel": ("construction", "Cancel a mesh task (id like T-005, or a label like 'pile row A-02'). If a robot owns it, the hub tells it to stop and waits for confirmation.", {"id": "string"}),
+    "task.release": ("construction", "Ask the owner of an assigned mesh task to stop and release it; a new bidding round opens once it confirms.", {"id": "string"}),
+    "task.priority": ("construction", "Change the priority of a mesh task that hasn't been allocated yet (higher goes first; rows are 1-3).", {"id": "string", "priority": "integer"}),
+    "mesh.cutLink": ("construction", "Remove the mesh link between two nodes (robots, relays M-n, GW, HUB), e.g. to test a broken relay path.", {"a": "string", "b": "string"}),
+    "mesh.restoreLink": ("construction", "Restore a removed mesh link between two nodes; with no args, restore every removed link.", {"a": "string (optional)", "b": "string (optional)"}),
+    "mesh.relay": ("construction", "Take a relay mast down or bring it back up.", {"id": "string", "up": "boolean"}),
+    "mesh.hub": ("construction", "Switch the hub (edge server's mesh radio) off or on. Robots keep agreeing on tasks they already have.", {"online": "boolean"}),
+    "mesh.latency": ("construction", "Set the mesh delivery delay per hop, in milliseconds.", {"ms": "number"}),
+    "mesh.loss": ("construction", "Set packet loss per radio hop, in percent.", {"pct": "number"}),
 }
 
 STAGES = ("survey", "buildup", "construction")
@@ -53,6 +63,7 @@ class Site:
         self.plan: dict | None = None
         self.preview: dict | None = None
         self.sim: SimulatedSite | None = None
+        self.mesh: SiteMesh | None = None
         self.plan_version = 0
 
     # ---------- state ----------
@@ -67,7 +78,7 @@ class Site:
         return "survey"
 
     def network_info(self) -> dict:
-        return {"relayRangeM": RELAY_RANGE_M, "assetRangeM": ASSET_RANGE_M, "loraRangeM": LORA_RANGE_M}
+        return {"relayRangeM": RELAY_RANGE_M, "assetRangeM": ASSET_RANGE_M, "loraRangeM": LORA_RANGE_M, "robotRangeM": ROBOT_RANGE_M}
 
     def coverage_b64(self) -> str:
         return base64.b64encode(np.packbits(self.survey.coverage).tobytes()).decode("ascii")
@@ -100,6 +111,15 @@ class Site:
             "twin.pauseAll": lambda: "Pause all robots",
             "twin.request": lambda: f"Send a {a.get('need')} to {a.get('target')}",
             "twin.cancelRequest": lambda: f"Cancel {a.get('id')}",
+            "task.cancel": lambda: f"Cancel task {self._task_label(a.get('id'))}",
+            "task.release": lambda: f"Release task {self._task_label(a.get('id'))}",
+            "task.priority": lambda: f"Set {self._task_label(a.get('id'))} priority to {a.get('priority')}",
+            "mesh.cutLink": lambda: f"Remove mesh link {a.get('a')}–{a.get('b')}",
+            "mesh.restoreLink": lambda: f"Restore mesh link {a.get('a')}–{a.get('b')}" if a.get("a") else "Restore all removed mesh links",
+            "mesh.relay": lambda: f"{'Bring up' if _truthy(a.get('up')) else 'Take down'} relay {a.get('id')}",
+            "mesh.hub": lambda: f"Switch the hub {'on' if _truthy(a.get('online')) else 'off'}",
+            "mesh.latency": lambda: f"Set mesh delay to {a.get('ms')} ms per hop",
+            "mesh.loss": lambda: f"Set packet loss to {a.get('pct')}%",
         }
         return labels.get(name, lambda: name)()
 
@@ -120,10 +140,23 @@ class Site:
             "twin.resume": ["id"],
             "twin.request": ["need", "target"],
             "twin.cancelRequest": ["id"],
+            "task.cancel": ["id"],
+            "task.release": ["id"],
+            "task.priority": ["id", "priority"],
+            "mesh.cutLink": ["a", "b"],
+            "mesh.relay": ["id", "up"],
+            "mesh.hub": ["online"],
+            "mesh.latency": ["ms"],
+            "mesh.loss": ["pct"],
         }.get(name, [])
         missing = [k for k in required if a.get(k) in (None, "", [])]
         if missing:
             raise ActionError(f"{name} needs {', '.join(missing)}.")
+        m = self.mesh
+        if name.startswith("task.") and m and not m.task_id(str(a["id"])):
+            raise ActionError(f"No mesh task matching '{a['id']}'. Use an id like T-005 or a label like 'pile row A-02'.")
+        if name == "mesh.cutLink" and m and not (m.node_id(str(a["a"])) and m.node_id(str(a["b"]))):
+            raise ActionError(f"Unknown mesh node in {a['a']}–{a['b']}. Nodes: {', '.join(sorted(m.tx.nodes))}.")
 
     def run_action(self, name: str, args: dict | None = None) -> str:
         a = args or {}
@@ -158,6 +191,26 @@ class Site:
             return sim.create_request(str(a["need"]), str(a["target"]), "Build manager")
         if name == "twin.cancelRequest":
             return sim.cancel_request(str(a["id"]))
+        m = self.mesh
+        assert m is not None
+        if name == "task.cancel":
+            return m.hub.cancel(m.task_id(str(a["id"])) or "")
+        if name == "task.release":
+            return m.hub.release(m.task_id(str(a["id"])) or "")
+        if name == "task.priority":
+            return m.hub.set_priority(m.task_id(str(a["id"])) or "", int(a["priority"]))
+        if name == "mesh.cutLink":
+            return m.cut_link(str(a["a"]), str(a["b"]))
+        if name == "mesh.restoreLink":
+            return m.restore_link(str(a["a"]), str(a.get("b", ""))) if a.get("a") else m.restore_link()
+        if name == "mesh.relay":
+            return sim.relay_up(str(a["id"])) if _truthy(a["up"]) else sim.relay_down(str(a["id"]))
+        if name == "mesh.hub":
+            return m.set_hub(_truthy(a["online"]))
+        if name == "mesh.latency":
+            return m.set_latency(float(a["ms"]))
+        if name == "mesh.loss":
+            return m.set_loss(float(a["pct"]))
         raise ActionError(f"Unhandled action {name}.")
 
     def _generate_plan(self, unit_count: int, crew_size: int) -> str:
@@ -184,6 +237,7 @@ class Site:
         if not self.plan:
             raise ActionError("Generate a plan first.")
         self.sim = SimulatedSite(self.plan)
+        self.mesh = SiteMesh(self.sim)
         return f"Plan approved. Construction has started on the blank site: {len(self.plan['units'])} units, crew of {self.plan['crewUsed']}."
 
     # ---------- simulation ----------
@@ -194,3 +248,18 @@ class Site:
     def tick_twin(self) -> None:
         if self.sim:
             self.sim.tick()
+
+    def tick_mesh(self, dt: float) -> None:
+        if self.mesh:
+            self.mesh.step(dt)
+
+    def _task_label(self, text) -> str:
+        m = self.mesh
+        tid = m.task_id(str(text)) if m and text is not None else None
+        return f"{tid} ({m.hub.tasks[tid]['label']})" if tid else str(text)
+
+
+def _truthy(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on", "up")
+    return bool(v)

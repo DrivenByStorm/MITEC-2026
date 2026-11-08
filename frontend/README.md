@@ -58,7 +58,8 @@ Enter **P3 units to build** and **Crew available**, then **Generate plan**, or a
 
 - **Site plan:** P3 units (orange = set, dotted = foundation ready, dashed = planned), robots and machines (teal), people (yellow), relay masts (diamonds), mesh links and relay coverage. Drag to pan, scroll to zoom, click anything to select it.
 - **Freshness:** when the twin stops hearing from an asset, it fades and then turns grey with a "last heard" age. The map always shows the last *reported* position, never a guess.
-- **Expanded view:** details for the selected asset with pause/resume, plus Overview, Machines, People, Network, Requests and Activity tabs.
+- **Site mesh:** robot links (dashed), the relay backbone and the hub's wire, with packets moving along the hops they actually took (announce blue, bid amber, agree purple, commit green, status teal; heartbeats optional). The box at the top left, labelled *Emulated bidding and consensus*, shows the current round; click it for the task.
+- **Expanded view:** details for the selected asset with pause/resume (and, for robots and relays, their mesh neighbors with **Cut link**), plus Overview, **Tasks** (task states, and per round: each bid the hub received, each robot's proposed winner, the tentative winner's matching agreements; Release / Cancel / Raise priority), **Mesh** (delay, loss, hub on/off, path to hub per robot, packet counters), Machines, People, Network, Requests and Activity tabs.
 
 ## How it's built
 
@@ -75,10 +76,14 @@ src/
   twin/
     types.ts         construction snapshot (as sent by the edge service)
     freshness.ts     live / lagging / stale
+  mesh/
+    types.ts         site mesh snapshot and packet hops (as sent by the edge service)
+    labels.ts        round summaries
   components/
     SurveyView.tsx / SurveyMap.tsx / SurveyPanel.tsx   survey stage
     BuildupView.tsx / PlanPanel.tsx                    buildup planning
     ConstructionView.tsx / SiteMap.tsx / StatePanel.tsx construction
+    MeshLayer.tsx / MeshPanels.tsx                     mesh links, packet animation, tasks and mesh tabs
     CommandConsole.tsx  chat with the site agent, suggestion cards
     Topbar.tsx, usePanZoom.ts
   App.tsx            stage switching, connection screen

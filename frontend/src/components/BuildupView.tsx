@@ -182,6 +182,7 @@ function PlanCard({
           </p>
           <ul className="plan-card__fleet">
             <li><strong>{f('pile')}</strong> pile-driving robot{f('pile') === 1 ? '' : 's'}</li>
+            <li><strong>{f('rover')}</strong> layout rover{f('rover') === 1 ? '' : 's'}</li>
             <li><strong>{f('crane')}</strong> crane{f('crane') === 1 ? '' : 's'}</li>
             <li><strong>{f('telehandler')}</strong> telehandler{f('telehandler') === 1 ? '' : 's'}</li>
             <li><strong>{f('trencher')}</strong> trencher{f('trencher') === 1 ? '' : 's'}</li>

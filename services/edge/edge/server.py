@@ -3,7 +3,8 @@
 One WebSocket (/ws) carries everything. Server -> client messages:
     hello    terrain (heights), network ranges, stage, plan, chat history, agent status, actions
     survey   survey snapshot (+ packed coverage bits when new ground was mapped)
-    twin     construction snapshot
+    twin     construction snapshot (with `mesh`: nodes, links, tasks, rounds, robot views)
+    traces   mesh packet hops since the last batch, for the packet animation
     plan     buildup plan + preview snapshot
     stage    furthest stage reached
     chat     one chat message (new or updated, keyed by id)
@@ -39,6 +40,8 @@ log = logging.getLogger("edge")
 
 AGENT_MIN_INTERVAL_S = float(os.environ.get("AGENT_MIN_INTERVAL_S", "20"))
 AGENT_PROACTIVE = os.environ.get("AGENT_PROACTIVE", "1") != "0"
+MESH_STEP_S = 0.1
+TRACE_EVERY = 2  # mesh steps per traces batch
 SURVEY_EVENTS = 60
 TWIN_EVENTS = 80
 CHAT_LIMIT = 300
@@ -69,7 +72,7 @@ class EdgeApp:
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._twin_loop()), asyncio.create_task(self._agent_loop())]
+        self._tasks = [asyncio.create_task(self._survey_loop()), asyncio.create_task(self._twin_loop()), asyncio.create_task(self._mesh_loop()), asyncio.create_task(self._agent_loop())]
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -100,6 +103,20 @@ class EdgeApp:
                 self.monitor.check()
                 await self._broadcast({"type": "twin", "snapshot": self._twin_snapshot()})
 
+    async def _mesh_loop(self) -> None:
+        n = 0
+        while True:
+            await asyncio.sleep(MESH_STEP_S)
+            mesh = self.site.mesh
+            if not mesh:
+                continue
+            self.site.tick_mesh(MESH_STEP_S)
+            n += 1
+            if n % TRACE_EVERY == 0:
+                traces = mesh.take_traces()
+                if traces and self.clients:
+                    await self._broadcast({"type": "traces", "meshNow": round(mesh.tx.now, 3), "wall": now_ms(), "traces": traces})
+
     async def _agent_loop(self) -> None:
         while True:
             await asyncio.sleep(2)
@@ -126,6 +143,8 @@ class EdgeApp:
             return None
         snap = self.site.sim.snapshot()
         snap["events"] = snap["events"][:TWIN_EVENTS]
+        if self.site.mesh:
+            snap["mesh"] = self.site.mesh.snapshot()
         return snap
 
     def _plan_msg(self) -> dict:
@@ -245,18 +264,18 @@ class EdgeApp:
 
     async def _handle_action(self, ws: WebSocket, msg: dict) -> None:
         name, args = str(msg.get("name")), msg.get("args") or {}
-        quiet = name == "survey.setDistance"  # slider drags shouldn't flood the chat
+        quiet = name in ("survey.setDistance", "mesh.latency", "mesh.loss")  # slider drags shouldn't flood the chat
         try:
             text = self.site.run_action(name, args)
             ok = True
         except ActionError as e:
             text, ok = str(e), False
         await ws.send_text(json.dumps({"type": "result", "id": msg.get("id"), "ok": ok, "text": text}))
+        label = self.site.describe_action(name, args)
         if not quiet:
-            label = self.site.describe_action(name, args)
             await self._post(**{"from": "site"}, text=text, action=label, ok=ok)
-            if ok:
-                self.agent.note(f"{label}. Result: {text}")
+        if ok and name != "survey.setDistance":
+            self.agent.note(f"{label}. Result: {text}")
         await self._after_change()
 
     async def _handle_decision(self, sid: str, approve: bool) -> None:

@@ -72,6 +72,25 @@ def main():
             assert "error" not in m["message"]["text"].lower(), m["message"]["text"]
             ws.send_text(json.dumps({"type": "action", "id": 4, "name": "twin.request", "args": {"need": "telehandler", "target": "B7"}}))
             print("request:", recv_until(ws, lambda m: m["type"] == "result")["text"])
+            # mesh: traces stream, snapshot carries the mesh, actions, agent tools
+            tr = recv_until(ws, lambda m: m["type"] == "traces")
+            print("traces:", len(tr["traces"]), sorted({x["type"] for x in tr["traces"]}))
+            t = recv_until(ws, lambda m: m["type"] == "twin" and m["snapshot"].get("mesh"))
+            mesh = t["snapshot"]["mesh"]
+            print("mesh:", mesh["mode"], len(mesh["nodes"]), "nodes", len(mesh["links"]), "links", mesh["counts"])
+            for i, (name, args) in enumerate([("mesh.cutLink", {"a": "GW", "b": "M-1"}), ("mesh.hub", {"online": False}), ("mesh.hub", {"online": True}),
+                                              ("mesh.restoreLink", {}), ("mesh.latency", {"ms": 400}), ("task.priority", {"id": "pile row A-02", "priority": 5}),
+                                              ("task.cancel", {"id": "nope"}), ("mesh.relay", {"id": "M-2", "up": False}), ("mesh.relay", {"id": "M-2", "up": True})]):
+                ws.send_text(json.dumps({"type": "action", "id": 10 + i, "name": name, "args": args}))
+                r = recv_until(ws, lambda m: m["type"] == "result")
+                print(f"  {name}: {r['ok']} {r['text'][:80]}")
+            assert edge.site.mesh.tx.latency_ms == 400
+            ws.send_text(json.dumps({"type": "chat", "text": "how is the mesh doing?"}))
+            m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent")
+            print("mesh tools:", m["message"]["tools"])
+            ws.send_text(json.dumps({"type": "chat", "text": "release that rover"}))
+            m = recv_until(ws, lambda m: m["type"] == "chat" and m["message"]["from"] == "agent" and m["message"]["suggestions"])
+            print("suggested:", m["message"]["suggestions"][0]["label"])
     # tool results never errored
     for call in fake.messages.calls:
         for msg in call["messages"]:

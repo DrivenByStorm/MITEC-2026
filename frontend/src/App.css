@@ -970,3 +970,154 @@
 .connecting__card { max-width: 46ch; padding: 24px 28px; border: 1px solid var(--rule); border-radius: 12px; background: var(--paper); }
 .connecting__card h1 { margin: 0 0 8px; font-family: var(--font-data); }
 .connecting__card code { font-size: 0.9em; }
+
+/* ---------- Site mesh (construction) ---------- */
+
+.unit--staked rect { fill: rgb(255 255 255 / 0.85); stroke: #6f7c80; }
+.unit--staked path { stroke: var(--basalt); stroke-width: 1.2; }
+
+.mesh-link--robot { stroke-width: 1.1; stroke-opacity: 0.55; stroke-dasharray: 5 3; }
+.mesh-link--r2r { stroke: #7b4bb3; stroke-width: 1.4; stroke-opacity: 0.7; stroke-dasharray: 2 2; }
+.mesh-link.is-hot, .mesh-link--robot.is-hot, .mesh-link--r2r.is-hot { stroke-opacity: 1; stroke-width: 2.4; }
+.robot-range { fill: #7b4bb3; fill-opacity: 0.05; stroke: #7b4bb3; stroke-opacity: 0.45; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.cut-link line { stroke: var(--alert); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
+.cut-link circle { fill: var(--paper); stroke: var(--alert); stroke-width: 2; }
+.cut-link path { stroke: var(--alert); stroke-width: 2.2; stroke-linecap: round; }
+.hub-mark circle { fill: none; stroke: var(--basalt); stroke-width: 2; }
+.hub-mark.is-off circle { stroke: var(--alert); stroke-dasharray: 4 3; }
+.hub-mark path { stroke: var(--alert); stroke-width: 3; stroke-linecap: round; }
+.pin-label {
+  font-family: var(--font-data);
+  font-size: 12.5px;
+  font-weight: 600;
+  fill: var(--basalt);
+  paint-order: stroke;
+  stroke: var(--ground);
+  stroke-width: 3px;
+}
+.hub-mark.is-off .pin-label { fill: var(--alert); }
+.task-pin circle { fill: none; stroke: #2b6cb0; stroke-width: 2.5; stroke-dasharray: 5 3; }
+.asset-note {
+  font-family: var(--font-data);
+  font-size: 11px;
+  font-weight: 500;
+  fill: #075960;
+  paint-order: stroke;
+  stroke: var(--ground);
+  stroke-width: 3px;
+}
+
+.pkt { stroke: #fff; stroke-width: 1; pointer-events: none; }
+.pkt--TASK_ANNOUNCE { fill: #2b6cb0; }
+.pkt--BID { fill: #d08a00; }
+.pkt--AGREE { fill: #7b4bb3; }
+.pkt--COMMIT { fill: #2f7d4f; }
+.pkt--STATUS { fill: #0e7c86; }
+.pkt--HEARTBEAT { fill: #8b979b; }
+.pkt--lost { stroke: var(--alert); stroke-dasharray: 2 1.5; }
+.pkt--broken { fill: var(--alert); }
+.pkt--arrived { fill-opacity: 0.35; }
+
+/* Allocation strip over the map */
+.alloc-strip {
+  position: absolute;
+  top: 50px;
+  left: 10px;
+  max-width: min(460px, calc(100% - 20px));
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-family: var(--font-data);
+  font-size: 0.9rem;
+  display: grid;
+  gap: 4px;
+}
+.alloc-strip__mode { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--slate); font-weight: 600; }
+.alloc-strip__warn { color: var(--alert); font-weight: 600; }
+.alloc-strip__round {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 8px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--basalt);
+  cursor: pointer;
+}
+.alloc-strip__rid { font-weight: 600; color: var(--slate); }
+.alloc-strip__task { font-weight: 600; }
+.alloc-strip__state { grid-column: 1 / -1; }
+.alloc-strip__round.is-stalled .alloc-strip__state { color: var(--alert); font-weight: 600; }
+.alloc-strip__round:hover .alloc-strip__task { text-decoration: underline; }
+.alloc-strip__counts { color: var(--slate); font-size: 0.85rem; }
+.alloc-strip__toggles { display: flex; gap: 12px; font-size: 0.85rem; }
+.alloc-strip__toggles label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.alloc-strip__toggles input { margin: 0; accent-color: var(--teal); }
+
+/* Tasks tab */
+.mode-label { margin: 0 0 8px; font-family: var(--font-data); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--slate); font-weight: 600; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; margin: 4px 0 8px; }
+.seg__btn { border: 0; border-left: 1px solid var(--rule); background: transparent; padding: 4px 12px; font-family: var(--font-data); font-weight: 500; cursor: pointer; color: var(--slate); }
+.seg__btn:first-child { border-left: 0; }
+.seg__btn[aria-checked='true'] { background: var(--basalt); color: var(--paper); }
+.task-id { display: block; font-family: var(--font-data); font-size: 0.78rem; color: var(--slate); font-weight: 400; }
+.task-prog { margin-left: 6px; font-family: var(--font-data); color: var(--slate); }
+.tstate {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--font-data);
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #e3e8e9;
+  color: var(--slate);
+  white-space: nowrap;
+}
+.tstate--announced { background: #dce7f5; color: #2b6cb0; }
+.tstate--bidding { background: #f6ead0; color: #8a5d00; }
+.tstate--awaiting { background: #ebe1f5; color: #5f3790; }
+.tstate--assigned, .tstate--in_progress { background: #d6ecee; color: #075960; }
+.tstate--completed { background: #dcefe2; color: var(--ok); }
+.tstate--no_eligible, .tstate--held { background: #eceeea; color: var(--slate); }
+.tstate--release_requested, .tstate--cancel_requested { background: #f8e0dd; color: var(--alert); }
+.tstate--cancelled { background: #eceeea; color: var(--slate); text-decoration: line-through; }
+.tstate--stalled, .tstate--uncertain { margin-left: 6px; background: var(--alert); color: #fff; }
+.steps--task { margin: 8px 0; }
+.steps--task li { font-size: 0.72rem; }
+.task-state-line { margin: 6px 0; }
+.round { margin-top: 8px; }
+.round__head { margin: 0 0 4px; }
+.table--round tbody tr { cursor: default; }
+.table--round tbody tr.is-winner { background: #eaf5ee; }
+.reason { display: block; font-size: 0.78rem; color: var(--slate); }
+.muted { color: var(--slate); font-style: italic; }
+.btn--ghost { background: var(--paper); color: var(--basalt); border-color: var(--rule); }
+.btn--ghost:hover { background: var(--playa); }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Robot / relay mesh detail */
+.robot-mesh { margin-top: 12px; border-top: 1px solid var(--rule); padding-top: 8px; }
+.robot-rounds, .neighbors { margin: 0 0 8px; padding: 0; list-style: none; font-size: 0.9rem; }
+.robot-rounds li, .neighbors li { display: flex; align-items: center; gap: 8px; padding: 3px 0; flex-wrap: wrap; }
+.neighbors li.is-cut { color: var(--alert); }
+.mini-btn {
+  margin-left: auto;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-family: var(--font-data);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.mini-btn:hover { border-color: var(--basalt); }
+.text-alert { color: var(--alert); }
+
+/* Mesh tab */
+.mesh-tab section { margin-bottom: 14px; }
+.slider { display: grid; gap: 2px; margin-bottom: 8px; font-size: 0.92rem; }
+.slider input { accent-color: var(--teal); width: 100%; }
+.chip--down { border-color: var(--alert); color: var(--alert); }

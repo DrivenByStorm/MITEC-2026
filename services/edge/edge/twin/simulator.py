@@ -1,5 +1,9 @@
 """Simulated construction of an approved buildup plan, from bare ground to installed units.
 
+The autonomous robots (pile drivers, layout rovers, the survey drone) don't pick their own work
+here: they take row tasks through the site mesh (edge/mesh), where they bid and agree on an owner.
+This module is their bodies: it moves them and runs whatever task they committed to.
+
 It keeps two copies of the world:
   - truth: where things really are and what they are really doing;
   - reported: what the digital twin has actually heard over the radio.
@@ -62,6 +66,7 @@ class SimulatedSite:
         self.last_installed: dict | None = None
         self.complete_logged = False
         self.reachable_relays: set[str] = set()
+        self.mesh_routes = None  # set by the site mesh: node -> next hop toward the hub
         o = plan["office"]
         self.edge_server = {"x": o["x"] + o["w"] - 30, "y": o["y"] + 45, "online": True}
         self.rtk_base = {"x": o["x"] + o["w"] - 30, "y": o["y"] + o["h"] - 30, "online": True}
@@ -151,6 +156,27 @@ class SimulatedSite:
         self.log("info", f"{req['id']} cancelled.")
         return f"Cancelled {req['id']}."
 
+    def relay_down(self, relay_id: str) -> str:
+        t = self.truth.get(relay_id.upper())
+        if not t or t["kind"] != "relay":
+            return f"No relay called {relay_id}."
+        if t["mode"] == "offline":
+            return f"{t['name']} is already down."
+        self._fail_relay(t, _now_ms(), 10 ** 6)
+        return f"{t['name']} is down. It stays down until you bring it back."
+
+    def relay_up(self, relay_id: str) -> str:
+        t = self.truth.get(relay_id.upper())
+        if not t or t["kind"] != "relay":
+            return f"No relay called {relay_id}."
+        if t["mode"] != "offline":
+            return f"{t['name']} is already up."
+        t["failedUntil"] = None
+        t["mode"] = "autonomous"
+        t["task"] = "Relaying"
+        self.log("info", f"{t['name']} is back online. Mesh routes restored.", t["id"])
+        return f"{t['name']} is back up."
+
     def resolve_target(self, text: str) -> dict | None:
         """Resolve "B7" / "block B row 7" / "C-03-07" / "laydown" / an asset name into map coordinates."""
         s = text.strip().upper()
@@ -206,6 +232,7 @@ class SimulatedSite:
             "inCab": False,
             "failedUntil": None,
             "lastVia": None,
+            "assignment": None,  # set by the robot's mesh agent once it commits to a task
         }
         t["baseMode"] = p.get("mode", "idle")
         t.update(p)
@@ -229,7 +256,10 @@ class SimulatedSite:
         park = 0
         n_pile, n_crane, n_th, n_tr = self._count("pile"), self._count("crane"), self._count("telehandler"), self._count("trencher")
         for i in range(1, n_pile + 1):
-            self._add_truth(id=f"RPD-{i}", name=f"RPD-{i}", kind="robot", role="Pile driver", **self._parking(park), mode="autonomous", speed=9, task="Heading to first block")
+            self._add_truth(id=f"RPD-{i}", name=f"RPD-{i}", kind="robot", role="Pile driver", **self._parking(park), mode="idle", speed=9, task="Available")
+            park += 1
+        for i in range(1, self._count("rover") + 1):
+            self._add_truth(id=f"LR-{i}", name=f"LR-{i}", kind="robot", role="Layout rover", **self._parking(park), mode="idle", speed=6, task="Available", energy=70 + self.rand() * 30)
             park += 1
         for i in range(1, n_crane + 1):
             self._add_truth(id=f"CR-{i}", name=f"CR-{i}", kind="machine", role="Crane", **self._parking(park), mode="manual", speed=7, task="Waiting for foundations")
@@ -246,18 +276,11 @@ class SimulatedSite:
                 waypoints=wps or [dict(self.laydown_pt)], task=f"Trenching block{'s' if len(mine) > 1 else ''} {', '.join(b['id'] for b in mine)}",
             )
             park += 1
-        # Drone: back-and-forth progress survey over the planned area.
-        xs = [u["x"] for u in plan["units"]]
-        ys = [u["y"] for u in plan["units"]]
-        if self._count("drone") and xs:
-            x0, x1, y0, y1 = min(xs) - 20, max(xs) + 20, min(ys) - 20, max(ys) + 20
-            lanes = max(2, round((y1 - y0) / 70))
-            wps = []
-            for k in range(lanes + 1):
-                y = y0 + (y1 - y0) * k / lanes
-                wps += [{"x": x1, "y": y}, {"x": x0, "y": y}] if k % 2 else [{"x": x0, "y": y}, {"x": x1, "y": y}]
+        # Drone: waits at the office until it wins a block survey over the mesh.
+        if self._count("drone"):
             o = plan["office"]
-            self._add_truth(id="DR-1", name="DR-1", kind="drone", role="Survey drone", x=o["x"] + 20, y=o["y"] + 20, mode="autonomous", speed=14, waypoints=wps, task="Daily progress survey")
+            self._add_truth(id="DR-1", name="DR-1", kind="drone", role="Survey drone", x=o["x"] + 20, y=o["y"] + 20, mode="idle", speed=14, task="Available",
+                            home={"x": o["x"] + 20, "y": o["y"] + 20})
 
         # Crew: every person the plan calls for, attached to the machine or job they work on.
         w = 0
@@ -374,13 +397,13 @@ class SimulatedSite:
         if t["requestId"] and t["role"] != "Telehandler":
             return
         role = t["role"]
-        if role == "Pile driver":
-            self._step_pile_driver(t, now)
+        if role in ("Pile driver", "Layout rover", "Survey drone"):
+            self._step_robot(t, now)
         elif role == "Crane":
             self._step_crane(t, now)
         elif role == "Telehandler":
             self._step_telehandler(t)
-        elif role in ("Trencher", "Survey drone"):
+        elif role == "Trencher":
             self._step_waypoints(t)
         elif t["kind"] == "worker":
             self._step_worker(t)
@@ -399,39 +422,66 @@ class SimulatedSite:
     def _claimed(self, role: str, me: dict) -> set[str]:
         return {o["workUnit"] for o in self.truth.values() if o is not me and o["role"] == role and o["workUnit"]}
 
-    def _step_pile_driver(self, t: dict, now: int) -> None:
-        taken = self._claimed("Pile driver", t)
-        unit = self.unit_by_id.get(t["workUnit"]) if t["workUnit"] else None
-        if not unit or unit["status"] != "planned":
-            t["workUnit"] = None
-            t["dwell"] = 0
-            # Stay in our block while it has work; otherwise take the next block nobody else is on.
-            other_blocks = {o["block"] for o in self.truth.values() if o is not t and o["role"] == "Pile driver" and o["block"]}
+    # Unit status each kind of row task needs before it can work a unit, and what it leaves behind.
+    WORK = {
+        "stake": {"needs": ("planned",), "sets": "staked", "dwell": 1, "doing": "Staking"},
+        "pile": {"needs": ("staked", "planned"), "sets": "piled", "dwell": 3, "doing": "Driving piles at"},
+        "check": {"needs": None, "sets": None, "dwell": 1, "doing": "Checking piles at"},
+    }
 
-            def has_work(b):
-                return bool(b) and any(u["block"] == b and u["status"] == "planned" and u["id"] not in taken for u in self.truth_units)
-
-            if not has_work(t["block"]):
-                t["block"] = next((b for b in self.block_order if b not in other_blocks and has_work(b)), None) or next((b for b in self.block_order if has_work(b)), None)
-            unit = next((u for u in self.truth_units if u["block"] == t["block"] and u["status"] == "planned" and u["id"] not in taken), None)
-            t["workUnit"] = unit["id"] if unit else None
-        if not unit:
+    def _step_robot(self, t: dict, now: int) -> None:
+        """Run the task this robot committed to over the mesh. No task: wait where it is."""
+        a = t["assignment"]
+        if not a or a["finished"]:
             t["mode"] = "idle"
-            t["task"] = "All foundations driven"
+            t["task"] = "Available"
+            t["dwell"] = 0
+            home = t.get("home")
+            if home:
+                self._move_toward(t, home["x"], home["y"])
             return
         t["mode"] = "autonomous"
+        if a["kind"] == "survey":
+            self._step_survey(t, a)
+            return
+        work = self.WORK[a["kind"]]
+        while a["done"] < len(a["units"]):
+            unit = self.unit_by_id.get(a["units"][a["done"]])
+            if unit and (work["needs"] is None or unit["status"] in work["needs"]):
+                break
+            a["done"] += 1  # already past this step (or gone): skip it
+            t["dwell"] = 0
+        if a["done"] >= len(a["units"]):
+            a["finished"] = True
+            t["task"] = f"{a['label']}: done"
+            return
+        unit = self.unit_by_id[a["units"][a["done"]]]
         if self._move_toward(t, unit["x"], unit["y"] + 7):
-            t["task"] = f"Driving piles at {unit['id']}"
+            t["task"] = f"{a['label']}: {work['doing'].lower()} {unit['id']} ({a['done'] + 1} of {len(a['units'])})"
             t["dwell"] += 1
-            if t["dwell"] >= 3:
-                unit["status"] = "piled"
-                t["outbox"].append({"unitId": unit["id"], "status": "piled", "at": now})
-                if self.rand() < 0.05:
+            if t["dwell"] >= work["dwell"]:
+                if work["sets"]:
+                    unit["status"] = work["sets"]
+                    t["outbox"].append({"unitId": unit["id"], "status": work["sets"], "at": now})
+                if a["kind"] == "pile" and self.rand() < 0.04:
                     t["outEvents"].append({"level": "warn", "text": f"{t['name']} hit refusal at {unit['id']}; pile flagged for engineer review.", "at": now})
-                t["workUnit"] = None
+                a["done"] += 1
                 t["dwell"] = 0
         else:
-            t["task"] = f"Moving to {unit['id']}"
+            t["task"] = f"{a['label']}: moving to {unit['id']}"
+
+    def _step_survey(self, t: dict, a: dict) -> None:
+        r = a["rect"]
+        corners = [(r["x"] - 15, r["y"] - 15), (r["x"] + r["w"] + 15, r["y"] - 15), (r["x"] + r["w"] + 15, r["y"] + r["h"] + 15), (r["x"] - 15, r["y"] + r["h"] + 15)]
+        leg = a.setdefault("leg", 0)
+        if leg >= len(corners):
+            a["finished"] = True
+            return
+        cx, cy = corners[leg]
+        t["task"] = f"{a['label']}: leg {leg + 1} of {len(corners)}"
+        if self._move_toward(t, cx, cy):
+            a["leg"] = leg + 1
+            a["done"] = a["leg"]
 
     def _step_crane(self, t: dict, now: int) -> None:
         taken = self._claimed("Crane", t)
@@ -582,7 +632,7 @@ class SimulatedSite:
     # ---------- network ----------
 
     @staticmethod
-    def _relay_online(t: dict) -> bool:
+    def _relay_online(t: dict) -> bool:  # noqa: D401
         return t["kind"] == "relay" and t["mode"] != "offline"
 
     def _compute_network(self) -> None:
@@ -619,7 +669,16 @@ class SimulatedSite:
 
     def _deliver_reports(self, now: int) -> None:
         rerouted = []
+        routes = self.mesh_routes() if self.mesh_routes else None
         for t in self.truth.values():
+            if routes is not None and t["kind"] in ("robot", "drone"):
+                # Mesh robots report over the site mesh: only with a path to the hub.
+                if t["id"] in routes:
+                    if self.rand() < 0.94:
+                        self._report(t, now, "mesh", routes[t["id"]])
+                else:
+                    self._mark_link(t["id"], "none")
+                continue
             if t["kind"] == "relay":
                 if self._relay_online(t) and t["id"] in self.reachable_relays:
                     self._report(t, now, "mesh")
@@ -680,8 +739,8 @@ class SimulatedSite:
                 u = self.reported_unit_by_id.get(item["unitId"])
                 if u:
                     u["status"] = item["status"]
-                verb = "drove piles" if item["status"] == "piled" else "set P3 unit"
-                self.log("info", f"{t['name']} {verb} at {item['unitId']}.", t["id"], item["at"])
+                if item["status"] == "installed":
+                    self.log("info", f"{t['name']} set P3 unit {item['unitId']}.", t["id"], item["at"])
             if delayed:
                 self.log("info", f"{t['name']} reconnected and synced {len(t['outbox'])} queued update(s).", t["id"])
             t["outbox"] = []

@@ -1,7 +1,9 @@
+import type { MeshSnapshot } from '../mesh/types'
+
 // Data model for the build-site digital twin.
 // Coordinates are site-local meters: x grows east, y grows south, origin at the NW corner.
 
-export type UnitStatus = 'planned' | 'piled' | 'installed'
+export type UnitStatus = 'planned' | 'staked' | 'piled' | 'installed'
 
 export interface P3Unit {
   id: string // e.g. "B-04-12" = block B, row 4, slot 12
@@ -114,4 +116,6 @@ export interface TwinSnapshot {
   uplink: { online: boolean; lastSync: number }
   events: TwinEvent[]
   requests: AssetRequest[]
+  /** The site mesh during construction: nodes, links, tasks, allocation rounds, robot views. */
+  mesh?: MeshSnapshot
 }

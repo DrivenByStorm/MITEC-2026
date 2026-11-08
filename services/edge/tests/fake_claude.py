@@ -51,6 +51,10 @@ class FakeMessages:
             return NS(content=[_tool("propose_action", {"action": "plan.approve", "args": {}, "reason": "Plan looks good."})], stop_reason="tool_use")
         if "where" in low:
             return NS(content=[_tool("find_asset", {"query": "RPD-1"})], stop_reason="tool_use")
+        if "mesh" in low:
+            return NS(content=[_tool("get_mesh_status", {}), _tool("get_tasks", {"state": "active"}), _tool("get_round", {})], stop_reason="tool_use")
+        if "release" in low:
+            return NS(content=[_tool("propose_action", {"action": "task.release", "args": {"id": "stake row A-01"}, "reason": "You asked to free that rover."})], stop_reason="tool_use")
         if "bad" in low:
             return NS(content=[_tool("propose_action", {"action": "twin.pause", "args": {"id": "RPD-1"}, "reason": "x"})], stop_reason="tool_use")
         return NS(content=[_tool("get_site_overview", {}), _tool("get_plan", {}), _tool("list_assets", {"issue": "stale"}), _tool("get_recent_events", {"limit": 3}), _tool("list_requests", {}), _tool("get_survey_status", {})], stop_reason="tool_use")

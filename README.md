@@ -5,7 +5,7 @@ Two twos
 
 ```
 frontend/        build manager console (React + Electron): map, state panel, chat with the site agent
-services/edge/   edge service (Python): survey, buildup planner, construction twin, monitor, Claude site agent
+services/edge/   edge service (Python): survey, buildup planner, construction twin, site mesh, monitor, Claude site agent
 tools/terrain/   fetches real elevation data for the site
 ```
 

@@ -15,6 +15,14 @@ interface Props {
   underlay?: ReactNode
   /** Extra controls rendered over the map (e.g. a plan card). */
   children?: ReactNode
+  /** Site mesh links, drawn instead of the relay links (toggled by "Mesh links"). Gets the mark scale. */
+  meshUnder?: (k: number) => ReactNode
+  /** Drawn above everything (packets). */
+  meshOver?: (k: number) => ReactNode
+  /** Short second line under a machine's name (e.g. its mesh task). */
+  notes?: Record<string, string>
+  /** Extra entries for the map key. */
+  keyExtra?: ReactNode
 }
 
 interface ViewBox {
@@ -25,7 +33,7 @@ interface ViewBox {
 }
 
 
-export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, coverageM = 270, underlay, children }: Props) {
+export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, coverageM = 270, underlay, children, meshUnder, meshOver, notes, keyExtra }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   // Extra room at the bottom so the map key never covers the site.
   const view = snapshot.view
@@ -187,14 +195,16 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, cover
           <Unit key={u.id} x={u.x} y={u.y} status={u.status} />
         ))}
 
+        {layers.mesh && meshUnder?.(k)}
         {layers.mesh &&
+          !meshUnder &&
           snapshot.links.map((l) => {
             const a = relayById.get(l.a)
             const b = relayById.get(l.b)
             if (!a || !b) return null
             return <line key={`${l.a}-${l.b}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="mesh-link" style={{ opacity: 0.35 + l.quality * 0.55 }} />
           })}
-        {layers.mesh && (() => {
+        {layers.mesh && !meshUnder && (() => {
           const gw = relayById.get('GW')
           return gw ? <line x1={gw.x} y1={gw.y} x2={snapshot.edgeServer.x} y2={snapshot.edgeServer.y} className="wired-link" /> : null
         })()}
@@ -217,8 +227,9 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, cover
           ))}
 
         {movers.map((m) => (
-          <MachineMark key={m.id} asset={m} now={snapshot.now} selected={m.id === selectedId} label={layers.labels} k={k} />
+          <MachineMark key={m.id} asset={m} now={snapshot.now} selected={m.id === selectedId} label={layers.labels} note={layers.labels ? notes?.[m.id] : undefined} k={k} />
         ))}
+        {meshOver?.(k)}
       </svg>
 
       <div className="map__tools" role="toolbar" aria-label="Map controls">
@@ -244,7 +255,7 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, cover
         ))}
       </fieldset>
 
-      <MapKey />
+      <MapKey extra={keyExtra} />
       {children}
     </div>
   )
@@ -280,6 +291,13 @@ function Contours({ w, h }: { w: number; h: number }) {
 
 function Unit({ x, y, status }: { x: number; y: number; status: string }) {
   if (status === 'installed') return <rect x={x - 6} y={y - 4} width={12} height={8} rx={1} className="unit unit--installed" />
+  if (status === 'staked')
+    return (
+      <g className="unit unit--staked">
+        <rect x={x - 6} y={y - 4} width={12} height={8} rx={1} />
+        <path d={`M${x - 3.5} ${y - 2}v4M${x + 3.5} ${y - 2}v4`} />
+      </g>
+    )
   if (status === 'piled')
     return (
       <g className="unit unit--piled">
@@ -305,7 +323,7 @@ function StaleTag({ a, now }: { a: Asset; now: number }) {
   )
 }
 
-function MachineMark({ asset: a, now, selected, label, k }: { asset: Asset; now: number; selected: boolean; label: boolean; k: number }) {
+function MachineMark({ asset: a, now, selected, label, note, k }: { asset: Asset; now: number; selected: boolean; label: boolean; note?: string; k: number }) {
   const paused = a.mode === 'paused'
   return (
     <g data-asset={a.id} className={`asset asset--${a.kind} ${freshClass(a, now)} ${paused ? 'is-paused' : ''}`} transform={`translate(${a.x} ${a.y}) scale(${k})`}>
@@ -326,6 +344,11 @@ function MachineMark({ asset: a, now, selected, label, k }: { asset: Asset; now:
       {label && (
         <text y={-15} textAnchor="middle" className="asset-label">
           {a.name}
+        </text>
+      )}
+      {note && (
+        <text y={22} textAnchor="middle" className="asset-note">
+          {note}
         </text>
       )}
       <StaleTag a={a} now={now} />
@@ -365,16 +388,18 @@ function RelayMark({ relay: r, now, selected, label, k }: { relay: Asset; now: n
   )
 }
 
-function MapKey() {
+function MapKey({ extra }: { extra?: ReactNode }) {
   return (
     <ul className="map__key" aria-label="Map key">
       <li><svg width="16" height="10"><rect x="2" y="1" width="12" height="8" rx="1" className="unit unit--installed" /></svg>P3 set</li>
       <li><svg width="16" height="10"><g className="unit unit--piled"><rect x="2" y="1" width="12" height="8" rx="1" /><circle cx="4.5" cy="5" r="1.4" /><circle cx="11.5" cy="5" r="1.4" /></g></svg>Foundation ready</li>
+      {extra && <li><svg width="16" height="10"><g className="unit unit--staked"><rect x="2" y="1" width="12" height="8" rx="1" /><path d="M4.5 3v4M11.5 3v4" /></g></svg>Staked</li>}
       <li><svg width="16" height="10"><rect x="2" y="1" width="12" height="8" rx="1" className="unit unit--planned" /></svg>Planned</li>
       <li><svg width="16" height="12"><rect x="1" y="2" width="14" height="8" rx="4" className="key-machine" /></svg>Robot or machine</li>
       <li><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" className="key-worker" /></svg>Person</li>
       <li><svg width="14" height="14"><path d="M7 1L13 7L7 13L1 7Z" className="key-relay" /></svg>Relay</li>
       <li><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" className="key-stale" /></svg>Not heard 30 s+</li>
+      {extra}
     </ul>
   )
 }

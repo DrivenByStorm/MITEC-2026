@@ -45,7 +45,7 @@ export interface PlannedRelay {
 export type FleetKind = 'robot' | 'machine' | 'drone' | 'network' | 'wearable'
 
 export interface FleetItem {
-  key: 'pile' | 'crane' | 'telehandler' | 'trencher' | 'drone' | 'relay' | 'loraGateway' | 'tag'
+  key: 'pile' | 'rover' | 'crane' | 'telehandler' | 'trencher' | 'drone' | 'relay' | 'loraGateway' | 'tag'
   name: string
   kind: FleetKind
   count: number
