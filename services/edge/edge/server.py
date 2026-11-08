@@ -122,7 +122,10 @@ class EdgeApp:
     async def _agent_loop(self) -> None:
         while True:
             await asyncio.sleep(2)
-            self._pending_findings += self.monitor.take()
+            new = self.monitor.take()
+            if self.site.clock.finishing:
+                continue  # skipping to the end: stay quiet, one wrap-up comes when it stops
+            self._pending_findings += new
             del self._pending_findings[:-15]
             if not (AGENT_PROACTIVE and self.agent.online and self._pending_findings):
                 continue
@@ -150,6 +153,7 @@ class EdgeApp:
         if self.site.days:
             snap["schedule"] = self.site.days.view()
         snap["clock"] = self.site.clock.view()
+        snap["manualChanges"] = self.site.manual_changes() if self.site.sim else []
         return snap
 
     def _plan_msg(self) -> dict:
@@ -285,7 +289,9 @@ class EdgeApp:
             text, ok = str(e), False
         await ws.send_text(json.dumps({"type": "result", "id": msg.get("id"), "ok": ok, "text": text}))
         label = self.site.describe_action(name, args)
-        if not quiet:
+        if ok and name == "sim.finishBuild":
+            await self._expire_suggestions(f"No longer applies: the site was fast-forwarded from day {self.site.clock.day}.", everything=True)
+        if not quiet or name in ("sim.finishBuild", "sim.cancelFinish"):
             await self._post(**{"from": "site"}, text=text, action=label, ok=ok)
         if ok and name != "survey.setDistance" and not name.startswith("sim."):
             self.agent.note(f"{label}. Result: {text}")
@@ -311,14 +317,14 @@ class EdgeApp:
         await self._update(msg)
         await self._after_change()
 
-    async def _expire_suggestions(self) -> None:
-        """Suggestions for an earlier stage can't run any more; close them so they don't linger."""
+    async def _expire_suggestions(self, reason: str | None = None, everything: bool = False) -> None:
+        """Suggestions for an earlier stage (or before a fast-forward) can't run any more; close them."""
         for m in self.chat:
             changed = False
             for card in m.get("suggestions") or []:
-                if card["status"] == "pending" and ACTIONS[card["action"]][0] not in (self.site.stage, "any"):
+                if card["status"] == "pending" and (everything or ACTIONS[card["action"]][0] not in (self.site.stage, "any")):
                     card["status"] = "expired"
-                    card["result"] = f"No longer applies: the site has moved on to {self.site.stage}."
+                    card["result"] = reason or f"No longer applies: the site has moved on to {self.site.stage}."
                     changed = True
             if changed:
                 await self._update(m)

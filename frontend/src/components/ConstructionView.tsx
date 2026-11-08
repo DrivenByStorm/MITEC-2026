@@ -132,7 +132,15 @@ export function ConstructionView({ snapshot: live, terrainImage, coverageM, chat
             meshOver={mesh && packets && packetsVisible ? (k) => <PacketLayer mesh={mesh} types={packetTypes} k={k} taskId={selectedTask} /> : undefined}
             keyExtra={mesh ? <PacketKey types={packetTypes} /> : undefined}
           >
-            {siteClock && <TimeDial clock={siteClock} mode="construction" act={edge.act} />}
+            {siteClock && (
+              <TimeDial
+                clock={siteClock}
+                mode="construction"
+                act={edge.act}
+                progress={{ set: snapshot.units.filter((u) => u.status === 'installed').length, total: snapshot.units.length }}
+                manualChanges={live.manualChanges}
+              />
+            )}
             {mesh && (
               <AllocationStrip mesh={mesh} onOpenTask={openTask} packets={packets} setPackets={setPackets} showHeartbeats={heartbeats} setShowHeartbeats={setHeartbeats} />
             )}

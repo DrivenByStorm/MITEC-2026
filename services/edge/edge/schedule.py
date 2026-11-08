@@ -139,5 +139,6 @@ class DayTracker:
                 "refusals": st["refusals"],
                 "proximityStops": st["proximityStops"],
                 "summary": rec["summary"],
+                "fastForward": bool(rec.get("fastForward")),
             })
         return {"units": n, "planDays": self.plan["totalDays"], "curve": self.curve, "days": rows, "complete": rows[-1]["total"]["set"] >= n if rows else False}

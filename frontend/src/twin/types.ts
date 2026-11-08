@@ -122,6 +122,8 @@ export interface TwinSnapshot {
   clock?: SiteClock
   /** Day-by-day progress against the plan. */
   schedule?: Schedule
+  /** Things the manager changed by hand that could stall or skew a skip to the end. */
+  manualChanges?: string[]
 }
 
 /** Site time. `ms` is UTC epoch ms on the site's own calendar: format it in UTC. */
@@ -139,6 +141,10 @@ export interface SiteClock {
   shiftLeftMin: number
   pauseAtDayEnd: boolean
   skipping: boolean
+  /** "Skip to end of build" is running. */
+  finishing: boolean
+  /** How the last skip to the end ended. */
+  lastFinish?: { reason: 'complete' | 'stalled' | 'limit' | 'cancelled'; text: string; fromDay: number }
   speeds: number[]
   surveySpeeds: number[]
   /** Above this speed, packets move too fast to animate. */
@@ -169,6 +175,8 @@ export interface ScheduleDay {
   refusals: number
   proximityStops: number
   summary?: string
+  /** Part of this day was fast-forwarded (coarser steps, so close calls may be missed). */
+  fastForward: boolean
 }
 
 export interface Schedule {

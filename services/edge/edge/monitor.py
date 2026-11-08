@@ -99,6 +99,8 @@ class Monitor:
                 self.findings.append(text)
             elif "attempt cancelled" in text:
                 self.findings.append(text)
+            elif text.startswith("Fast-forward finished"):
+                self.findings.append(text + " (The manager skipped to the end of the build: give a short wrap-up from get_schedule: finish against the plan, the slowest days, outages and stalls. If it stalled, say why and suggest the fix.)")
             elif text.startswith("Day ") and " done." in text:
                 self.findings.append(text + " (End of shift: a one-line daily summary is welcome; no need to repeat the numbers.)")
             elif text.startswith("All ") and "Construction complete" in text:

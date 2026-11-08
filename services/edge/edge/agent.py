@@ -73,7 +73,8 @@ How you work:
 - Messages starting with [Manager action] tell you what the manager did directly with the UI; take them into account.
 
 Time: construction runs at the plan's real rates on a site clock (Day 1 07:00, 10-hour shifts, nights skipped). The manager \
-can speed it up (1x to 900x), pause it, or skip to the end of the shift (sim.speed, sim.pause, sim.skipShift). Durations you \
+can speed it up (1x to 900x), pause it, skip to the end of the shift (sim.speed, sim.pause, sim.skipShift) or skip to the \
+end of the build (sim.finishBuild; it stops early if progress stalls). Durations you \
 see ("last heard 40 s ago", round ages) are site time. Use get_schedule for progress against the plan by day.
 """
 

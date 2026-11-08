@@ -19,7 +19,7 @@ import numpy as np
 from .buildup.assumptions import ASSUMPTIONS
 from .buildup.planner import PlannerContext, plan_site
 from .clock import SURVEY_SPEEDS, SiteClock
-from .schedule import DayTracker
+from .schedule import DayTracker, unit_counts
 from .survey.selection import SelectionAlgorithm, load_selection
 from .survey.session import SurveySession
 from .mesh.site_mesh import SiteMesh
@@ -59,7 +59,13 @@ ACTIONS: dict[str, tuple[str, str, dict]] = {
     "sim.pause": ("any", "Pause or resume the simulation.", {"paused": "boolean"}),
     "sim.skipShift": ("construction", "Fast-forward to the end of today's shift (work still happens, just quickly).", {}),
     "sim.pauseAtDayEnd": ("construction", "Pause automatically when each shift ends, so the day can be reviewed.", {"on": "boolean"}),
+    "sim.finishBuild": ("construction", "Fast-forward until every unit is set. Stops early if progress stalls. resetManual=true first undoes manual changes (paused robots, removed links, hub off, relays taken down, extra delay/loss).", {"resetManual": "boolean (optional)"}),
+    "sim.cancelFinish": ("construction", "Stop a running skip to the end of the build.", {}),
 }
+
+FINISH_CHUNK_S = 30  # site seconds per step while skipping to the end (coarser than normal; see README)
+FINISH_STALL_S = 4 * 3600  # shift time with no progress before the skip gives up
+DEFAULT_LATENCY_MS, DEFAULT_LOSS_PCT = 250, 2
 
 STAGES = ("survey", "buildup", "construction")
 
@@ -137,6 +143,8 @@ class Site:
             "sim.pause": lambda: "Pause the simulation" if _truthy(a.get("paused")) else "Resume the simulation",
             "sim.skipShift": lambda: "Skip to the end of today's shift",
             "sim.pauseAtDayEnd": lambda: f"{'Pause' if _truthy(a.get('on')) else 'Keep running'} at the end of each day",
+            "sim.finishBuild": lambda: "Skip to the end of the build" + (" (reset manual changes first)" if _truthy(a.get("resetManual")) else ""),
+            "sim.cancelFinish": lambda: "Stop skipping to the end of the build",
         }
         return labels.get(name, lambda: name)()
 
@@ -211,7 +219,16 @@ class Site:
         if name == "sim.pauseAtDayEnd":
             c.pause_at_day_end = _truthy(a["on"])
             return "Will pause at the end of each shift." if c.pause_at_day_end else "Won't pause at the end of each shift."
+        if name == "sim.finishBuild":
+            return self._start_finish(_truthy(a.get("resetManual")))
+        if name == "sim.cancelFinish":
+            if not c.finishing:
+                return "Not skipping to the end of the build."
+            self._stop_finish("cancelled", "Cancelled by the build manager.")
+            return f"Stopped at day {c.day}, {c.hhmm(c.time_of_day)}. Paused."
         if name == "sim.skipShift":
+            if c.finishing:
+                return "Already skipping to the end of the build."
             if c.turbo_until is not None:
                 return "Already skipping to the end of the shift."
             c.skip_to_shift_end()
@@ -308,7 +325,9 @@ class Site:
         speed = c.effective_speed()
         mesh.tx.record_traces = speed <= 2
         chunk_max = min(10.0, max(0.1, speed * 0.1))
-        if c.turbo_until is not None:
+        if c.finishing:
+            want, chunk_max, budget_s = 12 * 3600.0, FINISH_CHUNK_S, 0.2  # as fast as the budget allows
+        elif c.turbo_until is not None:
             budget_s *= 2  # skipping: work harder, the manager is waiting
         start = time.perf_counter()
         rolled = False
@@ -321,18 +340,121 @@ class Site:
             sim.tick(chunk)
             c.t += chunk
             want -= chunk
+            if c.finishing:
+                self.days.days[-1]["fastForward"] = True
+                if self._check_finish():
+                    rolled = True
+                    break
             if c.left_in_shift() <= 1e-6:
                 self._end_shift()
                 rolled = True
                 if c.turbo_until is not None:
                     c.end_turbo()
                     break
-                if c.pause_at_day_end:
+                if c.pause_at_day_end and not c.finishing:
                     c.paused = True
                     break
             if time.perf_counter() - start > budget_s:
                 break  # can't keep up at this speed: drop the rest rather than fall behind
         return rolled
+
+    # ---------- skip to the end of the build ----------
+
+    def manual_changes(self) -> list[str]:
+        """Things the manager changed that could stall or skew a skip to the end."""
+        out = []
+        sim, mesh = self.sim, self.mesh
+        paused = [t["name"] for t in sim.truth.values() if t["mode"] == "paused"]
+        if paused:
+            out.append(f"paused: {', '.join(paused)}")
+        down = [t["name"] for t in sim.truth.values() if t["kind"] == "relay" and t["failedUntil"] and t["failedUntil"] - self.now_ms() > 10 ** 8]
+        if down:
+            out.append(f"relays taken down: {', '.join(down)}")
+        if mesh.tx.cut:
+            out.append(f"{len(mesh.tx.cut)} mesh link{'s' if len(mesh.tx.cut) != 1 else ''} removed")
+        if not mesh.hub_online:
+            out.append("hub switched off")
+        if mesh.tx.latency_ms != DEFAULT_LATENCY_MS or mesh.tx.loss_pct != DEFAULT_LOSS_PCT:
+            out.append(f"mesh delay {round(mesh.tx.latency_ms)} ms, loss {mesh.tx.loss_pct:g}%")
+        return out
+
+    def _start_finish(self, reset: bool) -> str:
+        c, sim, mesh = self.clock, self.sim, self.mesh
+        if c.finishing:
+            return "Already skipping to the end of the build."
+        if all(u["status"] == "installed" for u in sim.reported_units):
+            return "Every unit is already set."
+        notes = ""
+        if reset:
+            changed = self.manual_changes()
+            for t in list(sim.truth.values()):
+                if t["mode"] == "paused":
+                    sim.resume(t["id"])
+                if t["kind"] == "relay" and t["failedUntil"] and t["failedUntil"] - self.now_ms() > 10 ** 8:
+                    sim.relay_up(t["id"])
+            mesh.restore_link()
+            mesh.set_hub(True) if not mesh.hub_online else None
+            mesh.set_latency(DEFAULT_LATENCY_MS)
+            mesh.set_loss(DEFAULT_LOSS_PCT)
+            if changed:
+                notes = f" Reset first: {'; '.join(changed)}."
+        c.end_turbo()
+        c.finishing = True
+        c.last_finish = None
+        self._finish = {"day": c.day, "time": c.hhmm(c.time_of_day), "progress": self._progress_key(), "since": sim.elapsed}
+        left = sum(u["status"] != "installed" for u in sim.reported_units)
+        return f"Skipping to the end of the build: {left} units still to set, plan says about {self.plan['totalDays']:g} days in total.{notes}"
+
+    def _progress_key(self) -> tuple:
+        u = unit_counts(self.sim.reported_units)
+        done = sum(t["state"] == "completed" for t in self.mesh.hub.tasks.values())
+        return (u["staked"], u["piled"], u["set"], done)
+
+    def _check_finish(self) -> bool:
+        """During a skip: stop when the build is done, stuck, or far past the plan. True if stopped."""
+        sim, c = self.sim, self.clock
+        n = len(sim.reported_units)
+        u = unit_counts(sim.reported_units)
+        if u["set"] >= n:
+            self._stop_finish("complete", f"All {n} units set on day {c.day} at {c.hhmm(c.time_of_day)} (the plan said about {self.plan['totalDays']:g} days).")
+            return True
+        key = self._progress_key()
+        if key != self._finish["progress"]:
+            self._finish["progress"] = key
+            self._finish["since"] = sim.elapsed
+        elif sim.elapsed - self._finish["since"] > FINISH_STALL_S:
+            self._stop_finish("stalled", f"No progress for {FINISH_STALL_S // 3600} working hours, stopped on day {c.day} at {c.hhmm(c.time_of_day)} with {u['set']} of {n} set. {self._stall_reasons()}")
+            return True
+        cap = int(self.plan["totalDays"] * 2) + 2
+        if c.day > cap:
+            self._stop_finish("limit", f"Stopped at day {c.day}, twice the plan's {self.plan['totalDays']:g} days, with {u['set']} of {n} set.")
+            return True
+        return False
+
+    def _stall_reasons(self) -> str:
+        reasons = self.manual_changes()
+        hub = self.mesh.hub
+        stalled = [r for r in hub.rounds.values() if hub.round_view(r)["stalled"]]
+        if stalled:
+            missing = sorted({p for r in stalled for p in r["participants"] if p not in r["bids"]})
+            reasons.append(f"agreement stalled in round {stalled[-1]['id']}" + (f" (no response from {', '.join(missing)})" if missing else ""))
+        waiting = {t["requires"] for t in hub.tasks.values() if t["state"] == "queued" and not hub.free_for(t["requires"])}
+        if waiting:
+            reasons.append(f"tasks waiting for a free robot with: {', '.join(sorted(waiting))}")
+        return ("Likely why: " + "; ".join(reasons) + ".") if reasons else ""
+
+    def _stop_finish(self, reason: str, text: str) -> None:
+        c = self.clock
+        if c.on_shift() and c.left_in_shift() > 1:
+            # One normal 1 s step, so everything reports fresh (the coarse steps left reports up to
+            # 30 s old, which would read as stale once the clock pauses).
+            self.mesh.step(1.0)
+            self.sim.tick(1.0)
+            c.t += 1.0
+        c.finishing = False
+        c.paused = True
+        c.last_finish = {"reason": reason, "text": text, "fromDay": self._finish["day"] if getattr(self, "_finish", None) else c.day}
+        self.sim.log("alert" if reason == "stalled" else "info", f"Fast-forward finished: {text}")
 
     def _end_shift(self) -> None:
         sim, days = self.sim, self.days

@@ -41,7 +41,11 @@ export function DaysTab({ schedule: s, clock }: { schedule: Schedule; clock?: Si
               const gap = d.total.set - d.expected.set
               return (
                 <tr key={d.day} className={d.live ? 'is-live' : ''}>
-                  <th scope="row">{d.day}{d.live && <span className="days__live">today</span>}</th>
+                  <th scope="row">
+                    {d.day}
+                    {d.live && <span className="days__live">today</span>}
+                    {d.fastForward && <span className="days__live" title="Fast-forwarded in coarse steps: close calls like proximity stops may be missed">fast-forwarded</span>}
+                  </th>
                   <td>{d.did.staked}</td>
                   <td>{d.did.piled}</td>
                   <td>{d.did.set}</td>

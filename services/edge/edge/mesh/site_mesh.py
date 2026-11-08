@@ -109,6 +109,7 @@ class SiteMesh:
         # Fine steps at normal speed; at high speed at most 20 steps per call (rounds still finish
         # inside a step, because robots answer from their packet handlers).
         n = max(1, min(round(dt / SUBSTEP_S), 20))
+        self.tx.invalidate()  # robots moved since the last call; nothing moves within it
         for _ in range(n):
             self.tx.advance(dt / n)
             for r in self.robots.values():

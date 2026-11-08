@@ -40,6 +40,8 @@ export type ActionName =
   | 'sim.pause'
   | 'sim.skipShift'
   | 'sim.pauseAtDayEnd'
+  | 'sim.finishBuild'
+  | 'sim.cancelFinish'
 
 export type Act = (name: ActionName, args?: Record<string, unknown>) => Promise<ActionResult>
 

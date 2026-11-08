@@ -31,6 +31,8 @@ class SiteClock:
         self.pause_at_day_end = False
         self.turbo_until: float | None = None  # site seconds; set by "skip to end of shift"
         self._paused_before_turbo = False
+        self.finishing = False  # "skip to end of build" is running
+        self.last_finish: dict | None = None  # how the last skip ended (shown on the dial)
 
     # ---------- reading ----------
 
@@ -69,7 +71,7 @@ class SiteClock:
         return f"{s // 3600:02d}:{(s % 3600) // 60:02d}"
 
     def effective_speed(self) -> float:
-        if self.turbo_until is not None:
+        if self.turbo_until is not None or self.finishing:
             return TURBO
         return 0.0 if self.paused else self.speed
 
@@ -87,6 +89,8 @@ class SiteClock:
             "shiftLeftMin": round(self.left_in_shift() / 60),
             "pauseAtDayEnd": self.pause_at_day_end,
             "skipping": self.turbo_until is not None,
+            "finishing": self.finishing,
+            "lastFinish": self.last_finish,
             "speeds": list(SPEEDS),
             "surveySpeeds": list(SURVEY_SPEEDS),
             "packetsMaxSpeed": PACKETS_MAX_SPEED,

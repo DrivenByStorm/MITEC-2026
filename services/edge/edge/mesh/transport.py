@@ -40,14 +40,13 @@ class Node:
     seen: dict[str, float] = field(default_factory=dict)
 
 
-@dataclass(order=True)
+@dataclass
 class _Delivery:
     at: float
-    seq: int
-    to: str = field(compare=False)
-    frm: str = field(compare=False)
-    packet: dict = field(compare=False)
-    trace: dict = field(compare=False)
+    to: str
+    frm: str
+    packet: dict
+    trace: dict
 
 
 def _pair(a: str, b: str) -> tuple[str, str]:
@@ -62,13 +61,14 @@ class MeshTransport:
         self.loss_pct = loss_pct
         self.nodes: dict[str, Node] = {}
         self.cut: set[tuple[str, str]] = set()
-        self._queue: list[_Delivery] = []
+        self._queue: list[tuple[float, int, _Delivery]] = []  # (arrival time, seq, delivery)
         self._seq = itertools.count()
         self._trace_seq = itertools.count(1)
         self._msg_seq: dict[str, itertools.count] = {}
         self.new_traces: list[dict] = []
         self.record_traces = True  # off at high speed: nobody can watch packets then
-        self._adj: dict[str, list[tuple[Node, str]]] | None = None  # link table, rebuilt each step
+        self._adj: dict[str, list[tuple[Node, str]]] | None = None  # link table, rebuilt when things change
+        self._pairs: set[tuple[str, str]] = set()
         self.stats = {"sent": 0, "hops": 0, "delivered": 0, "lost": 0, "broken": 0, "duplicates": 0}
 
     # ---------- nodes and links ----------
@@ -101,6 +101,7 @@ class MeshTransport:
     def _table(self) -> dict[str, list[tuple[Node, str]]]:
         if self._adj is None:
             adj: dict[str, list[tuple[Node, str]]] = {i: [] for i in self.nodes}
+            pairs: set[tuple[str, str]] = set()
             ns = list(self.nodes.values())
             for i, a in enumerate(ns):
                 for b in ns[i + 1:]:
@@ -108,14 +109,18 @@ class MeshTransport:
                     if k:
                         adj[a.id].append((b, k))
                         adj[b.id].append((a, k))
+                        pairs.add((a.id, b.id))
+                        pairs.add((b.id, a.id))
             self._adj = adj
+            self._pairs = pairs
         return self._adj
 
     def neighbors(self, node_id: str) -> list[tuple[Node, str]]:
         return self._table().get(node_id, [])
 
     def linked(self, a: str, b: str) -> bool:
-        return any(n.id == b for n, _ in self.neighbors(a))
+        self._table()
+        return (a, b) in self._pairs
 
     def links(self) -> list[dict]:
         out = []
@@ -199,15 +204,15 @@ class MeshTransport:
             if lost:
                 self.stats["lost"] += 1
                 continue
-            heapq.heappush(self._queue, _Delivery(self.now + d, next(self._seq), n.id, node.id, dict(pkt), tr))
+            heapq.heappush(self._queue, (self.now + d, next(self._seq), _Delivery(self.now + d, n.id, node.id, dict(pkt), tr)))
 
     # ---------- time ----------
 
     def advance(self, dt: float) -> None:
-        self._adj = None  # things may have moved since the last step
+        """Deliver everything due within dt. Call invalidate() first if nodes moved."""
         end = self.now + dt
-        while self._queue and self._queue[0].at <= end:
-            dv = heapq.heappop(self._queue)
+        while self._queue and self._queue[0][0] <= end:
+            dv = heapq.heappop(self._queue)[2]
             self.now = max(self.now, dv.at)
             self._deliver(dv)
         self.now = end
