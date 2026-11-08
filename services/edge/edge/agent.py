@@ -226,6 +226,7 @@ class SiteAgent:
         prefix = "".join(f"[Manager action] {n}\n" for n in self.pending_notes)
         self.pending_notes = []
         self._trim()
+        self._drop_old_thinking()
         start = len(self.history)
         self.history.append({"role": "user", "content": prefix + text})
         said: list[str] = []
@@ -514,6 +515,21 @@ class SiteAgent:
         return [{k: r[k] for k in ("id", "need", "status", "assignedTo", "eta")} | {"target": r["target"]["label"]} for r in sim.requests[:20]]
 
     # ---------- history ----------
+
+    def _drop_old_thinking(self) -> None:
+        """Remove thinking blocks from finished turns.
+
+        A thinking block's signature is bound to the exact conversation before it, so once _trim
+        drops old messages, any stored thinking block no longer matches and the API rejects the
+        whole request. Thinking is only needed within the turn in progress (while tools run), so
+        earlier turns' blocks can go.
+        """
+        for msg in self.history:
+            if msg["role"] != "assistant" or not isinstance(msg["content"], list):
+                continue
+            kept = [b for b in msg["content"] if b.get("type") not in ("thinking", "redacted_thinking")]
+            if len(kept) != len(msg["content"]):
+                msg["content"] = kept or [{"type": "text", "text": "(no reply)"}]
 
     def _trim(self) -> None:
         """Keep the conversation bounded, cutting only at the start of a plain user turn."""
