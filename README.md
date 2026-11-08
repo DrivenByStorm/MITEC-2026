@@ -155,7 +155,7 @@ Required inputs include a site map, task definitions, robot API access and times
 3. Bench-test three radios, then evaluate a supervised five-robot pilot with independently validated local stop behavior.
 4. Compare equivalent work against a manual-dispatch baseline before estimating operational value.
 
-| Example target | Meaning |
+| Example targets | Meaning |
 |---|---|
 | Zero conflicting owners across 100 emulated runs | A test target, not a proof of production correctness |
 | At least 95% of routine updates delivered within two seconds | A proposed target under defined nominal pilot conditions |
