@@ -1,3 +1,5 @@
+// Buildup plan as sent by the edge service (services/edge/edge/buildup/planner.py).
+
 import type { Pt } from '../survey/types'
 
 export interface PlanInput {
@@ -85,9 +87,35 @@ export interface SitePlan {
   buildableSlots: number
   /** Area to frame on the map. */
   bounds: Rect
-  /** Per-cell ground class for the overlay: 0 unmapped, 1 buildable, 2 too steep, 3 reserved (setback/office). */
-  ground: Uint8Array
+  /** Per-cell ground class for the overlay, base64 bytes: 0 unmapped, 1 buildable, 2 too steep, 3 reserved (setback/office). */
+  ground: string
+  /** Planning rates and limits the plan was made with (services/edge/edge/buildup/assumptions.py). */
+  assumptions: Assumptions
   terrain: { cols: number; rows: number; cellM: number }
-  /** Shaded elevation image from the survey, reused as the construction map background. */
-  terrainImage?: { href: string; x: number; y: number; w: number; h: number }
+}
+
+export interface Assumptions {
+  slotSpacingM: number
+  rowSpacingM: number
+  blockRows: number
+  blockSlots: number
+  maxSlopePct: number
+  maxFootprintReliefM: number
+  boundarySetbackM: number
+  pilesPerUnit: number
+  pileRobotPilesPerDay: number
+  pileRobotCrew: number
+  craneUnitsPerDay: number
+  craneCrew: number
+  telehandlerSpeedKmh: number
+  telehandlerLoadMin: number
+  telehandlerHandoffMin: number
+  telehandlerCrew: number
+  trencherMPerDay: number
+  trencherCrew: number
+  electricalUnitsPerDay: number
+  electricalCrew: number
+  workersPerForeman: number
+  workersPerSafetyLead: number
+  shiftMinutes: number
 }

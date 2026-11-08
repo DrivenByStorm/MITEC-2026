@@ -1,43 +1,38 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { SiteMap } from './SiteMap'
 import { StatePanel } from './StatePanel'
 import { CommandConsole } from './CommandConsole'
-import type { Message } from './CommandConsole'
 import { Topbar } from './Topbar'
 import type { Stage } from './Topbar'
-import { ageSeconds, formatAge, useTwin } from '../twin/source'
-import type { TwinSource } from '../twin/source'
-import { runCommand } from '../twin/commands'
+import { ageSeconds, formatAge } from '../twin/freshness'
 import type { TwinSnapshot } from '../twin/types'
+import { edge, useAgentSelection } from '../edge/client'
+import type { AgentState, ChatMessage } from '../edge/client'
 
 interface Props {
-  source: TwinSource
-  surveyLocked: boolean
+  snapshot: TwinSnapshot
+  terrainImage?: TwinSnapshot['terrainImage']
+  coverageM: number
+  chat: ChatMessage[]
+  agent: AgentState
+  siteStage: Stage
   onStage: (s: Stage) => void
-  messages: Message[]
-  addMessages: (m: Omit<Message, 'id'>[]) => void
 }
 
 /** Construction stage: the approved plan being built live, with machines, crews and the mesh. */
-export function ConstructionView({ source, surveyLocked, onStage, messages, addMessages }: Props) {
-  const snapshot = useTwin(source)
+export function ConstructionView({ snapshot: live, terrainImage, coverageM, chat, agent, onStage }: Props) {
+  const snapshot = useMemo(() => ({ ...live, terrainImage }), [live, terrainImage])
   const [expanded, setExpanded] = useState(false)
   const [selectedId, setSelectedId] = useState<string>()
   const [focus, setFocus] = useState<{ x: number; y: number; key: number }>()
 
-  const handleCommand = useCallback(
-    (text: string) => {
-      const result = runCommand(text, source.getSnapshot(), source)
-      const now = Date.now()
-      addMessages([
-        { from: 'you', text, at: now },
-        { from: 'site', text: result.reply, at: now },
-      ])
-      if (result.select) setSelectedId(result.select)
-      if (result.focus) setFocus({ ...result.focus, key: now })
-    },
-    [addMessages, source],
-  )
+  // When the agent looks something up, highlight it on the map.
+  useAgentSelection(chat, (id) => {
+    const a = live.assets.find((x) => x.id === id)
+    if (!a) return
+    setSelectedId(id)
+    setFocus({ x: a.x, y: a.y, key: Date.now() })
+  })
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -56,7 +51,7 @@ export function ConstructionView({ source, surveyLocked, onStage, messages, addM
       <Topbar
         title={snapshot.siteName}
         stage="construction"
-        surveyLocked={surveyLocked}
+        surveyLocked
         constructionReady
         onStage={onStage}
         status={[
@@ -72,14 +67,22 @@ export function ConstructionView({ source, surveyLocked, onStage, messages, addM
       />
       <main className="workspace">
         <div className="map-wrap">
-          <SiteMap snapshot={snapshot} selectedId={selectedId} onSelect={setSelectedId} focus={focus} expanded={expanded} />
+          <SiteMap snapshot={snapshot} selectedId={selectedId} onSelect={setSelectedId} focus={focus} expanded={expanded} coverageM={coverageM} />
           <button type="button" className="btn btn--expand" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>
             {expanded ? 'Collapse twin' : 'Expand twin'}
           </button>
         </div>
-        {expanded && <StatePanel snapshot={snapshot} selectedId={selectedId} onSelect={setSelectedId} onCommand={handleCommand} />}
+        {expanded && <StatePanel snapshot={snapshot} selectedId={selectedId} onSelect={setSelectedId} act={edge.act} />}
       </main>
-      <CommandConsole messages={messages} onSubmit={handleCommand} compact={expanded} examples={constructionExamples(snapshot)} />
+      <CommandConsole
+        messages={chat}
+        agent={agent}
+        onSubmit={edge.chat}
+        onDecide={edge.decide}
+        compact={expanded}
+        examples={constructionExamples(snapshot)}
+        intro="The site agent is watching the build. Ask it anything, or tell it what you need; it suggests the action and you approve it."
+      />
     </div>
   )
 }
@@ -87,5 +90,5 @@ export function ConstructionView({ source, surveyLocked, onStage, messages, addM
 function constructionExamples(s: TwinSnapshot) {
   const b = s.blocks[0]?.id ?? 'A'
   const row = s.units.find((u) => u.block === b)?.row ?? 1
-  return ['status', 'where is RPD-1', `need a telehandler at ${b}${row}`, 'pause CR-1', `who is in block ${b}`, 'network']
+  return ['How is the build going?', 'Where is RPD-1?', 'Anything I should worry about?', `Send a telehandler to ${b}${row}`, 'Is the network healthy?']
 }

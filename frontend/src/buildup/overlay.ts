@@ -12,8 +12,9 @@ export function groundOverlay(plan: SitePlan): { href: string; x: number; y: num
   canvas.height = rows
   const ctx = canvas.getContext('2d')!
   const img = ctx.createImageData(cols, rows)
-  for (let i = 0; i < plan.ground.length; i++) {
-    const g = plan.ground[i]
+  const ground = atob(plan.ground) // one byte per cell, base64 from the edge service
+  for (let i = 0; i < ground.length; i++) {
+    const g = ground.charCodeAt(i)
     const d = i * 4
     if (g === 2) {
       // too steep: brick red

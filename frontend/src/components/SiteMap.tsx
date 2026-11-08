@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { ASSET_RANGE_M } from '../twin/network'
 import type { Asset, TwinSnapshot } from '../twin/types'
-import { ageSeconds, formatAge, freshness } from '../twin/source'
+import { ageSeconds, formatAge, freshness } from '../twin/freshness'
 
 interface Props {
   snapshot: TwinSnapshot
@@ -10,6 +9,8 @@ interface Props {
   onSelect: (id: string | undefined) => void
   focus?: { x: number; y: number; key: number }
   expanded: boolean
+  /** Machine-to-relay link range, meters: the coverage circle around each relay. */
+  coverageM?: number
   /** Extra SVG drawn above the terrain and below the site (e.g. the buildable-ground overlay). */
   underlay?: ReactNode
   /** Extra controls rendered over the map (e.g. a plan card). */
@@ -23,9 +24,8 @@ interface ViewBox {
   h: number
 }
 
-const COVERAGE_M = ASSET_RANGE_M
 
-export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, underlay, children }: Props) {
+export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, coverageM = 270, underlay, children }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   // Extra room at the bottom so the map key never covers the site.
   const view = snapshot.view
@@ -167,7 +167,7 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, under
         {layers.coverage &&
           relays
             .filter((r) => r.mode !== 'offline')
-            .map((r) => <circle key={`cov-${r.id}`} cx={r.x} cy={r.y} r={COVERAGE_M} className="coverage" />)}
+            .map((r) => <circle key={`cov-${r.id}`} cx={r.x} cy={r.y} r={coverageM} className="coverage" />)}
 
         {/* Arrays */}
         {snapshot.blocks.map((b) => {

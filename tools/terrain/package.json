@@ -1,0 +1,12 @@
+{
+  "name": "terrain-tools",
+  "private": true,
+  "type": "module",
+  "description": "Fetch real elevation data for the site into services/edge/data/site-dem.json",
+  "scripts": {
+    "fetch": "node fetch-terrain.mjs"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  }
+}

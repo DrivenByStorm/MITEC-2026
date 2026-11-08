@@ -2,12 +2,13 @@
 // Downloads real elevation data for the site and bundles it into the app.
 //
 // Source: AWS Terrain Tiles (Terrarium PNG), derived from USGS 3DEP (~10 m) in the US.
-// Run this once on a machine with internet. The result, src/survey/data/site-dem.json,
-// is bundled into the app so the site itself never needs a connection.
+// Run this once on a machine with internet. The result, services/edge/data/site-dem.json,
+// is loaded by the edge service, so the site itself never needs a connection.
 //
-//   npm run terrain:fetch                      # default site in Pecos County, TX
-//   npm run terrain:fetch -- --lat 30.79 --lon -103.03 --size-km 6 --cell 15
-//   npm run terrain:fetch -- --tiles-dir ./my-tiles   # use tiles already on disk (z/x/y.png)
+//   cd tools/terrain && npm install
+//   npm run fetch                      # default site in Pecos County, TX
+//   npm run fetch -- --lat 30.79 --lon -103.03 --size-km 6 --cell 15
+//   npm run fetch -- --tiles-dir ./my-tiles   # use tiles already on disk (z/x/y.png)
 
 import { PNG } from 'pngjs'
 import fs from 'node:fs'
@@ -24,7 +25,7 @@ const cellM = num(args.cell, 15)
 const zoom = Math.round(num(args.zoom, 14))
 const tilesDir = args['tiles-dir'] ? path.resolve(args['tiles-dir']) : null
 const cacheDir = path.join(here, '.terrain-cache')
-const outFile = path.resolve(args.out ?? path.join(here, '..', 'src', 'survey', 'data', 'site-dem.json'))
+const outFile = path.resolve(args.out ?? path.join(here, '..', '..', 'services', 'edge', 'data', 'site-dem.json'))
 const URL_TEMPLATE = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
 
 // ---------- geometry ----------

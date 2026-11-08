@@ -369,7 +369,7 @@
 
 .console__empty p { margin: 0 0 8px; color: var(--slate); }
 
-.msg { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; max-width: 78ch; }
+.msg { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; max-width: 86ch; }
 .msg__who { font-family: var(--font-data); font-weight: 600; color: var(--slate); font-size: 0.9rem; padding-top: 1px; }
 .msg__text { margin: 0; white-space: pre-wrap; }
 .msg--you .msg__text { font-weight: 500; }
@@ -910,3 +910,63 @@
 
 .office--small .area-label,
 .office--small .small-label { display: none; }
+
+/* ---------- site agent chat ---------- */
+.msg--agent .msg__who { color: var(--teal); }
+.msg--proactive .msg__who { color: var(--p3); }
+.msg--proactive .msg__body { border-left: 3px solid var(--p3); padding-left: 10px; }
+.msg__body { display: grid; gap: 6px; min-width: 0; }
+.msg__tools { margin: 0; font-family: var(--font-data); font-size: 0.82rem; color: var(--slate); }
+.msg__activity { color: var(--slate); font-style: italic; }
+.msg--failed .msg__text { color: var(--alert); }
+.msg__action { font-family: var(--font-data); font-weight: 600; }
+.console__offline { color: var(--alert) !important; font-weight: 500; }
+
+.suggestion {
+  display: grid;
+  gap: 6px;
+  max-width: 56ch;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--teal);
+  border-radius: 8px;
+  background: #fff;
+}
+.suggestion__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.suggestion__tag { font-family: var(--font-data); font-size: 0.78rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--teal); }
+.suggestion__label { font-family: var(--font-data); font-size: 1rem; }
+.suggestion__reason { margin: 0; color: var(--slate); }
+.suggestion__status { margin: 0; font-size: 0.9rem; color: var(--slate); }
+.suggestion--approved { border-left-color: var(--ok); }
+.suggestion--approved .suggestion__status::first-line { color: var(--ok); }
+.suggestion--dismissed,
+.suggestion--expired { opacity: 0.6; border-left-color: var(--stale); }
+.suggestion--failed { border-left-color: var(--alert); }
+.suggestion--failed .suggestion__status { color: var(--alert); }
+.suggestion--inline { grid-template-columns: minmax(0, 1fr) auto; align-items: center; max-width: none; padding: 4px 8px; }
+.suggestion--inline .button-row { margin: 0; }
+.btn--small { height: 28px; padding: 0 10px; font-size: 0.88rem; }
+
+.agent-dot { width: 10px; height: 10px; border-radius: 50%; align-self: center; flex: none; background: var(--stale); }
+.agent-dot--on { background: var(--ok); }
+.agent-dot--busy { background: var(--teal); animation: agent-pulse 1s ease-in-out infinite; }
+@keyframes agent-pulse { 50% { opacity: 0.3; } }
+
+.conn-banner {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: var(--alert);
+  color: #fff;
+  font-family: var(--font-data);
+  font-weight: 600;
+}
+
+.connecting { display: grid; place-items: center; height: 100vh; background: var(--playa); }
+.connecting__card { max-width: 46ch; padding: 24px 28px; border: 1px solid var(--rule); border-radius: 12px; background: var(--paper); }
+.connecting__card h1 { margin: 0 0 8px; font-family: var(--font-data); }
+.connecting__card code { font-size: 0.9em; }

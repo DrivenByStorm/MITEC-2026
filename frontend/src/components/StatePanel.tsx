@@ -1,24 +1,25 @@
 import { useState } from 'react'
 import type { Asset, AssetRequest, TwinSnapshot } from '../twin/types'
-import { ageSeconds, formatAge, freshness } from '../twin/source'
+import { ageSeconds, formatAge, freshness } from '../twin/freshness'
+import type { Act } from '../edge/client'
 
 interface Props {
   snapshot: TwinSnapshot
   selectedId?: string
   onSelect: (id: string | undefined) => void
-  onCommand: (text: string) => void
+  act: Act
 }
 
 const TABS = ['Overview', 'Machines', 'People', 'Network', 'Requests', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
-export function StatePanel({ snapshot, selectedId, onSelect, onCommand }: Props) {
+export function StatePanel({ snapshot, selectedId, onSelect, act }: Props) {
   const [tab, setTab] = useState<Tab>('Overview')
   const selected = snapshot.assets.find((a) => a.id === selectedId)
 
   return (
     <aside className="panel" aria-label="Live site state">
-      {selected && <AssetDetail asset={selected} snapshot={snapshot} onClose={() => onSelect(undefined)} onCommand={onCommand} />}
+      {selected && <AssetDetail asset={selected} snapshot={snapshot} onClose={() => onSelect(undefined)} act={act} />}
 
       <div className="tabs" role="tablist" aria-label="Site state views">
         {TABS.map((t) => (
@@ -45,7 +46,7 @@ export function StatePanel({ snapshot, selectedId, onSelect, onCommand }: Props)
           <AssetTable assets={snapshot.assets.filter((a) => a.kind === 'worker')} now={snapshot.now} selectedId={selectedId} onSelect={onSelect} columns="people" />
         )}
         {tab === 'Network' && <Network snapshot={snapshot} selectedId={selectedId} onSelect={onSelect} />}
-        {tab === 'Requests' && <Requests requests={snapshot.requests} onSelect={onSelect} onCommand={onCommand} />}
+        {tab === 'Requests' && <Requests requests={snapshot.requests} target={firstRow(snapshot)} onSelect={onSelect} act={act} />}
         {tab === 'Activity' && <Activity snapshot={snapshot} onSelect={onSelect} />}
       </div>
     </aside>
@@ -80,7 +81,7 @@ function Meter({ value, label }: { value: number; label: string }) {
   )
 }
 
-function AssetDetail({ asset: a, snapshot, onClose, onCommand }: { asset: Asset; snapshot: TwinSnapshot; onClose: () => void; onCommand: (t: string) => void }) {
+function AssetDetail({ asset: a, snapshot, onClose, act }: { asset: Asset; snapshot: TwinSnapshot; onClose: () => void; act: Act }) {
   const machine = a.kind === 'robot' || a.kind === 'machine' || a.kind === 'drone'
   return (
     <section className="detail" aria-label={`${a.name} details`}>
@@ -112,9 +113,9 @@ function AssetDetail({ asset: a, snapshot, onClose, onCommand }: { asset: Asset;
       {machine && (
         <div className="detail__actions">
           {a.mode === 'paused' ? (
-            <button type="button" className="btn" onClick={() => onCommand(`resume ${a.name}`)}>Resume {a.name}</button>
+            <button type="button" className="btn" onClick={() => act('twin.resume', { id: a.id })}>Resume {a.name}</button>
           ) : (
-            <button type="button" className="btn btn--stop" onClick={() => onCommand(`pause ${a.name}`)}>Pause {a.name}</button>
+            <button type="button" className="btn btn--stop" onClick={() => act('twin.pause', { id: a.id })}>Pause {a.name}</button>
           )}
         </div>
       )}
@@ -292,12 +293,12 @@ function Network({ snapshot, selectedId, onSelect }: { snapshot: TwinSnapshot; s
 
 const STEPS: AssetRequest['status'][] = ['pending', 'assigned', 'en-route', 'arrived', 'done']
 
-function Requests({ requests, onSelect, onCommand }: { requests: AssetRequest[]; onSelect: (id: string) => void; onCommand: (t: string) => void }) {
+function Requests({ requests, target, onSelect, act }: { requests: AssetRequest[]; target: string; onSelect: (id: string) => void; act: Act }) {
   if (!requests.length) {
     return (
       <div className="empty">
         <p>No equipment requests yet.</p>
-        <button type="button" className="btn" onClick={() => onCommand('need a telehandler at B7')}>Request a telehandler at B7</button>
+        <button type="button" className="btn" onClick={() => act('twin.request', { need: 'telehandler', target })}>Request a telehandler at {target}</button>
       </div>
     )
   }
@@ -327,7 +328,7 @@ function Requests({ requests, onSelect, onCommand }: { requests: AssetRequest[];
               </ol>
             )}
             {!['done', 'cancelled'].includes(r.status) && (
-              <button type="button" className="link-btn" onClick={() => onCommand(`cancel ${r.id}`)}>Cancel</button>
+              <button type="button" className="link-btn" onClick={() => act('twin.cancelRequest', { id: r.id })}>Cancel</button>
             )}
           </li>
         )
@@ -351,4 +352,11 @@ function Activity({ snapshot, onSelect }: { snapshot: TwinSnapshot; onSelect: (i
 
 function clock(t: number) {
   return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+}
+
+/** A real place to offer in the "request a telehandler" example: row 1 of the first block. */
+function firstRow(s: TwinSnapshot) {
+  const b = s.blocks[0]?.id ?? 'A'
+  const row = s.units.find((u) => u.block === b)?.row ?? 1
+  return `${b}${row}`
 }

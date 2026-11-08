@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import type { SitePlan } from '../buildup/types'
-import { ASSUMPTIONS } from '../buildup/assumptions'
 
 const TABS = ['Fleet', 'Crew', 'Schedule', 'Network', 'Assumptions'] as const
 type Tab = (typeof TABS)[number]
@@ -8,6 +7,7 @@ type Tab = (typeof TABS)[number]
 /** Everything the planner decided, with the reason for each quantity. */
 export function PlanPanel({ plan }: { plan: SitePlan }) {
   const [tab, setTab] = useState<Tab>('Fleet')
+  const A = plan.assumptions
   return (
     <aside className="panel" aria-label="Plan details">
       <div className="tabs" role="tablist" aria-label="Plan views">
@@ -121,26 +121,26 @@ export function PlanPanel({ plan }: { plan: SitePlan }) {
 
         {tab === 'Assumptions' && (
           <>
-            <p className="hint">The planner's rates and limits. Values Built Robotics publishes are used where available; the rest are estimates to confirm with Exowatt. Change them in src/buildup/assumptions.ts.</p>
+            <p className="hint">The planner's rates and limits. Values Built Robotics publishes are used where available; the rest are estimates to confirm with Exowatt. Change them in services/edge/edge/buildup/assumptions.py.</p>
             <dl className="assumptions">
               <dt>Piles per P3 unit</dt>
-              <dd>{ASSUMPTIONS.pilesPerUnit} (estimate)</dd>
+              <dd>{A.pilesPerUnit} (estimate)</dd>
               <dt>Pile-driving robot</dt>
-              <dd>{ASSUMPTIONS.pileRobotPilesPerDay} piles/day, {ASSUMPTIONS.pileRobotCrew}-person crew (Built Robotics RPD 35)</dd>
+              <dd>{A.pileRobotPilesPerDay} piles/day, {A.pileRobotCrew}-person crew (Built Robotics RPD 35)</dd>
               <dt>Crane</dt>
-              <dd>{ASSUMPTIONS.craneUnitsPerDay} units/day, crew of {ASSUMPTIONS.craneCrew} (estimate)</dd>
+              <dd>{A.craneUnitsPerDay} units/day, crew of {A.craneCrew} (estimate)</dd>
               <dt>Telehandler</dt>
-              <dd>{ASSUMPTIONS.telehandlerSpeedKmh} km/h, {ASSUMPTIONS.telehandlerLoadMin + ASSUMPTIONS.telehandlerHandoffMin} min to load and hand off (estimate)</dd>
+              <dd>{A.telehandlerSpeedKmh} km/h, {A.telehandlerLoadMin + A.telehandlerHandoffMin} min to load and hand off (estimate)</dd>
               <dt>Trencher</dt>
-              <dd>{ASSUMPTIONS.trencherMPerDay} m/day, crew of {ASSUMPTIONS.trencherCrew} (estimate)</dd>
+              <dd>{A.trencherMPerDay} m/day, crew of {A.trencherCrew} (estimate)</dd>
               <dt>Electrical crew</dt>
-              <dd>{ASSUMPTIONS.electricalUnitsPerDay} units/day, {ASSUMPTIONS.electricalCrew} electricians (estimate)</dd>
+              <dd>{A.electricalUnitsPerDay} units/day, {A.electricalCrew} electricians (estimate)</dd>
               <dt>Supervision</dt>
-              <dd>1 foreman per {ASSUMPTIONS.workersPerForeman}, 1 safety lead per {ASSUMPTIONS.workersPerSafetyLead}</dd>
+              <dd>1 foreman per {A.workersPerForeman}, 1 safety lead per {A.workersPerSafetyLead}</dd>
               <dt>Buildable ground</dt>
-              <dd>Mapped, slope ≤ {ASSUMPTIONS.maxSlopePct}%, ≤ {ASSUMPTIONS.maxFootprintReliefM} m relief under a unit, {ASSUMPTIONS.boundarySetbackM} m from the boundary</dd>
+              <dd>Mapped, slope ≤ {A.maxSlopePct}%, ≤ {A.maxFootprintReliefM} m relief under a unit, {A.boundarySetbackM} m from the boundary</dd>
               <dt>Layout</dt>
-              <dd>{ASSUMPTIONS.slotSpacingM} m between units, {ASSUMPTIONS.rowSpacingM} m between rows, blocks of {ASSUMPTIONS.blockRows} × {ASSUMPTIONS.blockSlots}</dd>
+              <dd>{A.slotSpacingM} m between units, {A.rowSpacingM} m between rows, blocks of {A.blockRows} × {A.blockSlots}</dd>
               <dt>Network</dt>
               <dd>Machine-to-relay 270 m, relay-to-relay 460 m, two relays covering every unit</dd>
             </dl>

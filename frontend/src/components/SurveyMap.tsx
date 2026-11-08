@@ -1,13 +1,20 @@
 import { useMemo, useState } from 'react'
 import type { SurveyDrone, SurveySnapshot } from '../survey/types'
-import type { SurveySource } from '../survey/source'
 import { buildRegion, renderHeatmap, RAMP_CSS } from '../survey/heatmap'
 import { usePanZoom } from './usePanZoom'
 import type { ViewBox } from './usePanZoom'
 
+/** What the map needs from the terrain feed: heights, mapped cells and the survey distance control. */
+export interface TerrainFeed {
+  readonly heights: Float32Array
+  readonly coverage: Uint8Array
+  elevationAt(p: { x: number; y: number }): number | undefined
+  setDistance(m: number): void
+}
+
 interface Props {
   snapshot: SurveySnapshot
-  source: SurveySource
+  source: TerrainFeed
   expanded: boolean
   /** Hide the floating status bar (e.g. when a panel or card already shows it). */
   hideStatus?: boolean
@@ -232,7 +239,7 @@ function DroneMark({ d, k, selected, showLabel }: { d: SurveyDrone; k: number; s
   )
 }
 
-function StartCard({ s, source, onStart }: { s: SurveySnapshot; source: SurveySource; onStart: (m: number) => void }) {
+function StartCard({ s, source, onStart }: { s: SurveySnapshot; source: TerrainFeed; onStart: (m: number) => void }) {
   return (
     <form
       className="start-card"

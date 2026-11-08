@@ -26,5 +26,3 @@ dist-ssr
 # Electron packaging output
 release
 
-# Downloaded terrain tiles (the processed site-dem.json is committed)
-scripts/.terrain-cache

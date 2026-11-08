@@ -1,18 +1,19 @@
 import { useState } from 'react'
 import type { SurveySnapshot } from '../survey/types'
-import { phaseLabel } from '../survey/commands'
+import { phaseLabel } from '../survey/labels'
+import type { Act } from '../edge/client'
 
 interface Props {
   snapshot: SurveySnapshot
   selectedDrone?: string
   onSelectDrone: (id: string | undefined) => void
-  onCommand: (text: string) => void
+  act: Act
 }
 
 const TABS = ['Overview', 'Sections', 'Drones', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
-export function SurveyPanel({ snapshot: s, selectedDrone, onSelectDrone, onCommand }: Props) {
+export function SurveyPanel({ snapshot: s, selectedDrone, onSelectDrone, act }: Props) {
   const [tab, setTab] = useState<Tab>('Overview')
   return (
     <aside className="panel" aria-label="Survey state">
@@ -24,8 +25,8 @@ export function SurveyPanel({ snapshot: s, selectedDrone, onSelectDrone, onComma
         ))}
       </div>
       <div className="panel__body" role="tabpanel">
-        {tab === 'Overview' && <Overview s={s} onCommand={onCommand} />}
-        {tab === 'Sections' && <Sections s={s} onCommand={onCommand} />}
+        {tab === 'Overview' && <Overview s={s} act={act} />}
+        {tab === 'Sections' && <Sections s={s} act={act} />}
         {tab === 'Drones' && <Drones s={s} selected={selectedDrone} onSelect={onSelectDrone} />}
         {tab === 'Activity' && <Activity s={s} />}
       </div>
@@ -33,7 +34,7 @@ export function SurveyPanel({ snapshot: s, selectedDrone, onSelectDrone, onComma
   )
 }
 
-function Overview({ s, onCommand }: { s: SurveySnapshot; onCommand: (t: string) => void }) {
+function Overview({ s, act }: { s: SurveySnapshot; act: Act }) {
   const pct = Math.round(s.stats.coverage * 100)
   return (
     <div className="overview">
@@ -78,15 +79,15 @@ function Overview({ s, onCommand }: { s: SurveySnapshot; onCommand: (t: string) 
           <ul className="chips">
             {s.suggestions.slice(0, 6).map((id) => (
               <li key={id}>
-                <button type="button" className="chip" onClick={() => onCommand(`survey ${id}`)}>
+                <button type="button" className="chip" onClick={() => act('survey.requestSections', { ids: [id] })}>
                   Map {id} ({Math.round((s.sections.find((x) => x.id === id)?.coverage ?? 0) * 100)}%)
                 </button>
               </li>
             ))}
           </ul>
           <div className="button-row">
-            <button type="button" className="btn" onClick={() => onCommand('map more')}>Map suggested gaps</button>
-            <button type="button" className="btn btn--primary" onClick={() => onCommand('move to buildup')}>Move forward with buildup</button>
+            <button type="button" className="btn" onClick={() => act('survey.mapMore')}>Map suggested gaps</button>
+            <button type="button" className="btn btn--primary" onClick={() => act('survey.lock')}>Move forward with buildup</button>
           </div>
         </section>
       )}
@@ -96,7 +97,7 @@ function Overview({ s, onCommand }: { s: SurveySnapshot; onCommand: (t: string) 
   )
 }
 
-function Sections({ s, onCommand }: { s: SurveySnapshot; onCommand: (t: string) => void }) {
+function Sections({ s, act }: { s: SurveySnapshot; act: Act }) {
   if (!s.sections.length) return <p className="hint">Sections appear once the scout closes the boundary loop.</p>
   const k = Math.round(Math.sqrt(s.sections.length))
   return (
@@ -108,7 +109,7 @@ function Sections({ s, onCommand }: { s: SurveySnapshot; onCommand: (t: string) 
             key={sec.id}
             type="button"
             className={`section-tile section-tile--${sec.status}`}
-            onClick={() => onCommand(`survey ${sec.id}`)}
+            onClick={() => act('survey.requestSections', { ids: [sec.id] })}
             disabled={sec.status === 'done' || sec.status === 'mapping' || s.phase === 'locked'}
             aria-label={`${sec.id}, ${Math.round(sec.coverage * 100)}% mapped, ${sec.status}`}
           >

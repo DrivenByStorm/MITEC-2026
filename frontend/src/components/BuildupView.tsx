@@ -1,85 +1,45 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { SiteMap } from './SiteMap'
 import { CommandConsole } from './CommandConsole'
-import type { Message } from './CommandConsole'
 import { Topbar } from './Topbar'
 import type { Stage } from './Topbar'
 import { PlanPanel } from './PlanPanel'
-import type { SurveySource } from '../survey/source'
-import { useSurvey } from '../survey/source'
-import { buildRegion, renderHeatmap } from '../survey/heatmap'
-import { planSite } from '../buildup/planner'
-import { planPreview } from '../buildup/preview'
 import { groundOverlay } from '../buildup/overlay'
-import { buildupExamples, runBuildupCommand, summary } from '../buildup/commands'
 import type { SitePlan } from '../buildup/types'
+import type { SurveySnapshot } from '../survey/types'
 import type { TwinSnapshot } from '../twin/types'
+import { edge } from '../edge/client'
+import type { AgentState, ChatMessage } from '../edge/client'
 
 interface Props {
-  survey: SurveySource
+  survey: SurveySnapshot
   plan: SitePlan | null
-  setPlan: (p: SitePlan) => void
-  onApprove: (p: SitePlan) => void
+  /** The plan drawn as a site snapshot (units as planned footprints, relays live), from the edge service. */
+  preview: TwinSnapshot | null
+  terrainImage?: TwinSnapshot['terrainImage']
+  coverageM: number
+  chat: ChatMessage[]
+  agent: AgentState
+  siteStage: Stage
   onStage: (s: Stage) => void
-  constructionReady: boolean
-  messages: Message[]
-  addMessages: (m: Omit<Message, 'id'>[]) => void
 }
 
-/** Buildup planning: the build manager sets units and crew; the planner lays out the site and sizes everything else. */
-export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constructionReady, messages, addMessages }: Props) {
-  const s = useSurvey(survey)
+/** Buildup planning: the build manager sets units and crew; the planner on the edge service lays out the site and sizes everything else. */
+export function BuildupView({ survey: s, plan, preview, terrainImage, coverageM, chat, agent, siteStage, onStage }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [units, setUnits] = useState(plan?.input.unitCount ?? 240)
   const [crew, setCrew] = useState(plan?.input.crewSize ?? 30)
   const [showGround, setShowGround] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const approved = siteStage === 'construction'
 
-  // Shaded terrain from the survey, reused under the plan and later under construction.
-  const terrainImage = useMemo(() => {
-    const region = buildRegion(s, survey.heights)
-    if (!region) return undefined
-    const { cellM } = s.terrain
-    return { href: renderHeatmap(region, survey.coverage, s.terrain.cols), x: region.c0 * cellM, y: region.r0 * cellM, w: region.w * cellM, h: region.h * cellM }
-  }, [survey, s.coverageVersion]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const makePlan = useCallback(
-    (unitCount: number, crewSize: number) => {
-      const snap = survey.getSnapshot()
-      const p = planSite(
-        { unitCount, crewSize },
-        { heights: survey.heights, coverage: survey.coverage, cols: snap.terrain.cols, rows: snap.terrain.rows, cellM: snap.terrain.cellM, perimeter: snap.perimeter, launch: snap.launch },
-      )
-      p.terrainImage = terrainImage
-      setPlan(p)
-      return p
-    },
-    [survey, terrainImage, setPlan],
-  )
-
-  const handleCommand = useCallback(
-    (text: string) => {
-      const now = Date.now()
-      const r = runBuildupCommand(text, plan)
-      if (r.plan) {
-        const u = r.plan.unitCount ?? units
-        const c = r.plan.crewSize ?? crew
-        setUnits(u)
-        setCrew(c)
-        const p = makePlan(u, c)
-        addMessages([
-          { from: 'you', text, at: now },
-          { from: 'site', text: summary(p), at: now },
-        ])
-        return
-      }
-      addMessages([
-        { from: 'you', text, at: now },
-        { from: 'site', text: r.reply, at: now },
-      ])
-      if (r.approve && plan) onApprove(plan)
-    },
-    [plan, units, crew, makePlan, addMessages, onApprove],
-  )
+  // A plan can also come from the agent (an approved suggestion); keep the inputs in step with it.
+  const [seenPlan, setSeenPlan] = useState(plan?.createdAt)
+  if (plan && plan.createdAt !== seenPlan) {
+    setSeenPlan(plan.createdAt)
+    setUnits(plan.input.unitCount)
+    setCrew(plan.input.crewSize)
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -89,7 +49,19 @@ export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constru
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const preview: TwinSnapshot = useMemo(() => (plan ? planPreview(plan) : blankPreview(s, terrainImage)), [plan, s.perimeter, terrainImage]) // eslint-disable-line react-hooks/exhaustive-deps
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const snapshot: TwinSnapshot = useMemo(
+    () => (preview ? { ...preview, terrainImage } : blankPreview(s, terrainImage)),
+    [preview, s.perimeter.length, terrainImage], // eslint-disable-line react-hooks/exhaustive-deps
+  )
   const overlay = useMemo(() => (plan ? groundOverlay(plan) : null), [plan])
 
   return (
@@ -98,10 +70,10 @@ export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constru
         title="New site, Pecos County TX"
         stage="buildup"
         surveyLocked
-        constructionReady={constructionReady}
+        constructionReady={approved}
         onStage={onStage}
         status={[
-          { label: plan ? 'Plan ready for approval' : 'No plan yet', tone: plan ? 'ok' : 'idle' },
+          { label: approved ? 'Plan approved' : plan ? 'Plan ready for approval' : 'No plan yet', tone: plan ? 'ok' : 'idle' },
           { label: `${Math.round(s.stats.coverage * 100)}% of site surveyed`, tone: 'plain' },
           { label: s.terrain.real ? 'Real terrain' : 'Synthetic terrain', tone: s.terrain.real ? 'ok' : 'idle' },
         ]}
@@ -110,9 +82,10 @@ export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constru
         <div className="map-wrap">
           <SiteMap
             key={plan ? `${plan.createdAt}` : 'blank'}
-            snapshot={preview}
+            snapshot={snapshot}
             onSelect={() => {}}
             expanded={expanded}
+            coverageM={coverageM}
             underlay={
               overlay && showGround ? (
                 <image href={overlay.href} x={overlay.x} y={overlay.y} width={overlay.w} height={overlay.h} preserveAspectRatio="none" style={{ imageRendering: 'pixelated' }} />
@@ -125,8 +98,10 @@ export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constru
               crew={crew}
               setUnits={setUnits}
               setCrew={setCrew}
-              onGenerate={() => handleCommand(`plan ${units} units with ${crew} people`)}
-              onApprove={() => handleCommand('approve plan')}
+              busy={busy}
+              approved={approved}
+              onGenerate={() => run(() => edge.act('plan.generate', { unitCount: units, crewSize: crew }))}
+              onApprove={() => run(() => edge.act('plan.approve'))}
               onDetails={() => setExpanded(true)}
               expanded={expanded}
               showGround={showGround}
@@ -142,24 +117,33 @@ export function BuildupView({ survey, plan, setPlan, onApprove, onStage, constru
         {expanded && plan && <PlanPanel plan={plan} />}
       </main>
       <CommandConsole
-        messages={messages}
-        onSubmit={handleCommand}
+        messages={chat}
+        agent={agent}
+        onSubmit={edge.chat}
+        onDecide={edge.decide}
         compact={expanded}
         examples={buildupExamples(plan)}
-        intro="Tell the planner how many P3 units to build and how many people you have. It decides the layout, relays, robots, machines and crew."
+        intro="Set the P3 units and crew on the map, or tell the site agent. The planner decides the layout, relays, robots, machines and crew; the agent can explain any of it."
       />
     </div>
   )
 }
 
+function buildupExamples(plan: SitePlan | null): string[] {
+  if (!plan) return ['Plan 240 units with 30 people', 'How many units fit on this site?', 'What crew do I need for 400 units?']
+  return ['Why this many relays?', 'What is the bottleneck?', `What if I had ${plan.input.crewSize + 10} people?`, 'Approve the plan']
+}
+
 function PlanCard({
-  plan, units, crew, setUnits, setCrew, onGenerate, onApprove, onDetails, expanded, showGround, setShowGround,
+  plan, units, crew, setUnits, setCrew, busy, approved, onGenerate, onApprove, onDetails, expanded, showGround, setShowGround,
 }: {
   plan: SitePlan | null
   units: number
   crew: number
   setUnits: (n: number) => void
   setCrew: (n: number) => void
+  busy: boolean
+  approved: boolean
   onGenerate: () => void
   onApprove: () => void
   onDetails: () => void
@@ -189,7 +173,7 @@ function PlanCard({
           <input type="number" min={1} max={400} value={crew} onChange={(e) => setCrew(Number(e.target.value))} />
         </label>
       </div>
-      <button type="submit" className={`btn ${plan && !changed ? '' : 'btn--primary'}`}>{plan ? (changed ? 'Update plan' : 'Re-plan') : 'Generate plan'}</button>
+      <button type="submit" className={`btn ${plan && !changed ? '' : 'btn--primary'}`} disabled={busy || approved}>{plan ? (changed ? 'Update plan' : 'Re-plan') : 'Generate plan'}</button>
 
       {plan && (
         <div className="plan-card__result">
@@ -205,7 +189,7 @@ function PlanCard({
             <li><strong>{plan.crewUsed}</strong> people</li>
           </ul>
           <div className="button-row">
-            <button type="button" className="btn btn--primary" onClick={onApprove} disabled={!!changed}>Approve and build</button>
+            <button type="button" className="btn btn--primary" onClick={onApprove} disabled={!!changed || busy || approved}>{approved ? 'Approved' : 'Approve and build'}</button>
             {!expanded && <button type="button" className="btn" onClick={onDetails}>Details</button>}
           </div>
           {changed && <p className="hint">Inputs changed. Update the plan before approving.</p>}
@@ -223,7 +207,7 @@ function PlanCard({
   )
 }
 
-function blankPreview(s: ReturnType<SurveySource['getSnapshot']>, terrainImage: TwinSnapshot['terrainImage']): TwinSnapshot {
+function blankPreview(s: SurveySnapshot, terrainImage: TwinSnapshot['terrainImage']): TwinSnapshot {
   const [nw, , se] = s.perimeter.length ? s.perimeter : [{ x: s.launch.x - 500, y: s.launch.y - 500 }, null, { x: s.launch.x + 500, y: s.launch.y + 500 }]
   const pad = 80
   const now = s.now
