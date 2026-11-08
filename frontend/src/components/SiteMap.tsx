@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import { ASSET_RANGE_M } from '../twin/network'
 import type { Asset, TwinSnapshot } from '../twin/types'
 import { ageSeconds, formatAge, freshness } from '../twin/source'
 
@@ -9,6 +10,10 @@ interface Props {
   onSelect: (id: string | undefined) => void
   focus?: { x: number; y: number; key: number }
   expanded: boolean
+  /** Extra SVG drawn above the terrain and below the site (e.g. the buildable-ground overlay). */
+  underlay?: ReactNode
+  /** Extra controls rendered over the map (e.g. a plan card). */
+  children?: ReactNode
 }
 
 interface ViewBox {
@@ -18,12 +23,13 @@ interface ViewBox {
   h: number
 }
 
-const COVERAGE_M = 270 // keep in step with ASSET_RANGE in the simulator
+const COVERAGE_M = ASSET_RANGE_M
 
-export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded }: Props) {
+export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded, underlay, children }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   // Extra room at the bottom so the map key never covers the site.
-  const fit: ViewBox = useMemo(() => ({ x: -20, y: -30, w: snapshot.site.w + 40, h: snapshot.site.h + 110 }), [snapshot.site.w, snapshot.site.h])
+  const view = snapshot.view
+  const fit: ViewBox = useMemo(() => ({ x: view.x, y: view.y - view.h * 0.06, w: view.w, h: view.h * 1.16 }), [view.x, view.y, view.w, view.h])
   const [px, setPx] = useState({ w: 1000, h: 600 })
   const [vb, setVb] = useState<ViewBox>(fit)
   const [layers, setLayers] = useState({ coverage: true, mesh: true, people: true, labels: true })
@@ -101,7 +107,7 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded }: Pro
   const relays = snapshot.assets.filter((a) => a.kind === 'relay')
   const relayById = new Map(relays.map((r) => [r.id, r]))
   const movers = snapshot.assets.filter((a) => a.kind === 'robot' || a.kind === 'machine' || a.kind === 'drone')
-  const workers = snapshot.assets.filter((a) => a.kind === 'worker')
+  const workers = snapshot.assets.filter((a) => a.kind === 'worker' && !a.inCab)
   const openRequests = snapshot.requests.filter((r) => !['done', 'cancelled'].includes(r.status))
   const showWorkerNames = layers.labels && zoom > 2.2
   // Draw marks and labels in screen pixels (1 unit inside a mark ≈ 1 px), growing a
@@ -130,15 +136,28 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded }: Pro
         </defs>
 
         <rect x={0} y={0} width={snapshot.site.w} height={snapshot.site.h} className="ground" />
+        {snapshot.terrainImage ? (
+          <image
+            href={snapshot.terrainImage.href}
+            x={snapshot.terrainImage.x}
+            y={snapshot.terrainImage.y}
+            width={snapshot.terrainImage.w}
+            height={snapshot.terrainImage.h}
+            preserveAspectRatio="none"
+            className="terrain-image"
+          />
+        ) : (
+          <Contours w={snapshot.site.w} h={snapshot.site.h} />
+        )}
         <rect x={0} y={0} width={snapshot.site.w} height={snapshot.site.h} fill="url(#ground)" />
-        <Contours w={snapshot.site.w} h={snapshot.site.h} />
+        {underlay}
 
-        {/* Site office: edge server, RTK base, laydown yard */}
-        <g className="office">
-          <rect x={1000} y={170} width={300} height={150} className="laydown" />
-          <text x={1008} y={310} className="area-label">Laydown yard</text>
-          <rect x={1050} y={405} width={200} height={160} className="office__pad" />
-          <text x={1058} y={556} className="area-label">Site office</text>
+        {/* Site office: edge server, RTK base, laydown yard (labels only when there's room) */}
+        <g className={`office ${snapshot.office.w * pxPerUnit < 120 ? 'office--small' : ''}`}>
+          <rect x={snapshot.laydown.x} y={snapshot.laydown.y} width={snapshot.laydown.w} height={snapshot.laydown.h} className="laydown" />
+          <text x={snapshot.laydown.x + 8} y={snapshot.laydown.y + snapshot.laydown.h - 10} className="area-label">Laydown yard</text>
+          <rect x={snapshot.office.x} y={snapshot.office.y} width={snapshot.office.w} height={snapshot.office.h} className="office__pad" />
+          <text x={snapshot.office.x + 8} y={snapshot.office.y + snapshot.office.h - 10} className="area-label">Site office</text>
           <rect x={snapshot.edgeServer.x - 10} y={snapshot.edgeServer.y - 10} width={20} height={20} className="edge-server" />
           <text x={snapshot.edgeServer.x + 16} y={snapshot.edgeServer.y + 5} className="small-label">Edge server</text>
           <path d={`M${snapshot.rtkBase.x} ${snapshot.rtkBase.y - 10}l9 16h-18z`} className="rtk" />
@@ -226,6 +245,7 @@ export function SiteMap({ snapshot, selectedId, onSelect, focus, expanded }: Pro
       </fieldset>
 
       <MapKey />
+      {children}
     </div>
   )
 }

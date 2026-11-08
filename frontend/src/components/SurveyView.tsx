@@ -11,14 +11,14 @@ import { phaseLabel, runSurveyCommand, surveyExamples } from '../survey/commands
 const source = getSurveySource()
 
 interface Props {
-  stage: 'survey' | 'buildup'
   onStage: (s: Stage) => void
+  constructionReady: boolean
   messages: Message[]
   addMessages: (m: Omit<Message, 'id'>[]) => void
 }
 
 /** Survey stage: drones build the terrain model of a new site from scratch. */
-export function SurveyView({ stage, onStage, messages, addMessages }: Props) {
+export function SurveyView({ onStage, constructionReady, messages, addMessages }: Props) {
   const s = useSurvey(source)
   const [expanded, setExpanded] = useState(false)
   const [selectedDrone, setSelectedDrone] = useState<string>()
@@ -26,11 +26,6 @@ export function SurveyView({ stage, onStage, messages, addMessages }: Props) {
   const handleCommand = useCallback(
     (text: string) => {
       const lower = text.toLowerCase()
-      if (/construction demo/.test(lower)) {
-        addMessages([{ from: 'you', text, at: Date.now() }])
-        onStage('construction')
-        return
-      }
       const result = runSurveyCommand(text, source.getSnapshot(), source)
       const now = Date.now()
       addMessages([
@@ -38,9 +33,9 @@ export function SurveyView({ stage, onStage, messages, addMessages }: Props) {
         { from: 'site', text: result.reply, at: now },
       ])
       if (result.selectDrone) setSelectedDrone(result.selectDrone)
-      if (source.getSnapshot().phase === 'locked' && stage === 'survey' && /buildup|lock|finish/.test(lower)) onStage('buildup')
+      if (source.getSnapshot().phase === 'locked' && /buildup|lock|finish/.test(lower)) onStage('buildup')
     },
-    [addMessages, onStage, stage],
+    [addMessages, onStage],
   )
 
   useEffect(() => {
@@ -58,8 +53,9 @@ export function SurveyView({ stage, onStage, messages, addMessages }: Props) {
     <div className={`app ${expanded ? 'app--expanded' : ''}`}>
       <Topbar
         title={title}
-        stage={stage}
+        stage="survey"
         surveyLocked={s.phase === 'locked'}
+        constructionReady={constructionReady}
         onStage={onStage}
         status={[
           { label: phaseLabel(s.phase), tone: s.phase === 'idle' ? 'idle' : s.phase === 'locked' ? 'ok' : 'warn' },
@@ -74,32 +70,18 @@ export function SurveyView({ stage, onStage, messages, addMessages }: Props) {
             snapshot={s}
             source={source}
             expanded={expanded}
-            hideStatus={expanded || stage === 'buildup'}
+            hideStatus={expanded}
             selectedDrone={selectedDrone}
             onSelectDrone={setSelectedDrone}
             onSectionClick={(id) => handleCommand(`survey ${id}`)}
             onStart={(m) => handleCommand(`start survey ${m} m`)}
             onLock={() => handleCommand('move to buildup')}
-            onOpenConstruction={() => onStage('construction')}
+            onOpenBuildup={() => onStage('buildup')}
           />
           {s.phase !== 'idle' && (
             <button type="button" className="btn btn--expand" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>
               {expanded ? 'Collapse twin' : 'Expand twin'}
             </button>
-          )}
-          {stage === 'buildup' && (
-            <div className="stage-card" role="dialog" aria-labelledby="buildup-title">
-              <h2 id="buildup-title" className="start-card__title">Buildup planning</h2>
-              <p className="start-card__text">
-                The terrain model is ready: {s.stats.mappedAreaKm2.toFixed(2)} km² mapped
-                {s.stats.minM !== undefined ? ` with ${(s.stats.maxM! - s.stats.minM).toFixed(0)} m of relief` : ''}. The buildup algorithm
-                will use it to lay out P3 units, roads and trenches. That's the next piece to design.
-              </p>
-              <div className="button-row">
-                <button type="button" className="btn" onClick={() => onStage('survey')}>Back to survey map</button>
-                <button type="button" className="btn btn--primary" onClick={() => onStage('construction')}>Open construction demo</button>
-              </div>
-            </div>
           )}
         </div>
         {expanded && <SurveyPanel snapshot={s} selectedDrone={selectedDrone} onSelectDrone={setSelectedDrone} onCommand={handleCommand} />}

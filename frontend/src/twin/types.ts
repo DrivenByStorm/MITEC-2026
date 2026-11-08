@@ -45,6 +45,8 @@ export interface Asset {
   via?: string
   /** For workers: on shift and on site. */
   onSite?: boolean
+  /** For workers: riding inside a machine cab (hidden on the map, never triggers proximity stops). */
+  inCab?: boolean
 }
 
 export interface RelayLink {
@@ -86,10 +88,23 @@ export interface Block {
   slots: number
 }
 
+export interface Rect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 export interface TwinSnapshot {
   now: number
   siteName: string
   site: { w: number; h: number }
+  /** Area to frame on the map. */
+  view: Rect
+  office: Rect
+  laydown: Rect
+  /** Optional shaded terrain image drawn under the site. */
+  terrainImage?: { href: string; x: number; y: number; w: number; h: number }
   blocks: Block[]
   units: P3Unit[]
   assets: Asset[]

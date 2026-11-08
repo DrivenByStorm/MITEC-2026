@@ -14,7 +14,7 @@ export function surveyExamples(s: SurveySnapshot): string[] {
   if (s.phase === 'scouting') return ['status', 'where is SC-1', 'recall drones']
   if (s.phase === 'surveying') return ['status', 'where is SV-2', 'recall drones']
   if (s.phase === 'review') return ['map more', s.suggestions[0] ? `survey ${s.suggestions[0]}` : 'status', 'move to buildup']
-  return ['status', 'open construction demo']
+  return ['status']
 }
 
 const HELP = [

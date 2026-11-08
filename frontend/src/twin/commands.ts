@@ -27,10 +27,10 @@ const HELP = [
   'Things you can ask or tell the site:',
   '• status — progress, crews and network at a glance',
   '• where is <name> — find a robot, machine, worker or relay',
-  '• need a <telehandler | crane> at <B7 | C-03-07 | laydown> — request equipment',
+  '• need a <telehandler | crane> at <B7 | A-03-07 | laydown> — request equipment',
   '• pause <name> / resume <name> — hold or release a machine',
   '• stop all robots — pause every robot and drone',
-  '• who is in block <A–D> — people and machines in a block',
+  '• who is in block <A, B, ...> — people and machines in a block',
   '• network — relay health and anything out of coverage',
   '• requests — open equipment requests; cancel REQ-001 to cancel one',
 ].join('\n')
@@ -126,7 +126,7 @@ export function runCommand(input: string, snapshot: TwinSnapshot, source: TwinSo
   if (req) {
     const target = source.resolveTarget(req[2])
     if (!target) {
-      return { reply: `I couldn't place "${req[2]}" on the map. Use a block and row like B7, a unit like C-03-07, a machine name, or "laydown".` }
+      return { reply: `I couldn't place "${req[2]}" on the map. Use a block and row like A3, a unit like A-03-07, a machine name, or "laydown".` }
     }
     const r = source.createRequest(req[1], target, 'Build manager')
     const assigned = r.assignedTo ? ` Assigned to ${r.assignedTo}, about ${r.eta} s away.` : ' Nothing suitable is free yet, so it is queued.'
@@ -145,11 +145,12 @@ export function runCommand(input: string, snapshot: TwinSnapshot, source: TwinSo
   }
 
   // Who is in block X
-  const inBlock = lower.match(/(?:who|what)(?:'s| is)?\s+in\s+block\s+([a-d])/)
+  const inBlock = lower.match(/(?:who|what)(?:'s| is)?\s+in\s+block\s+([a-z]{1,2})\b/)
   if (inBlock) {
     const id = inBlock[1].toUpperCase()
     const here = snapshot.assets.filter((a) => a.kind !== 'relay' && blockOf(snapshot, a.x, a.y)?.id === id)
-    const b = snapshot.blocks.find((x) => x.id === id)!
+    const b = snapshot.blocks.find((x) => x.id === id)
+    if (!b) return { reply: `There's no block ${id}. Blocks on this site: ${snapshot.blocks.map((x) => x.id).join(', ')}.` }
     if (!here.length) return { reply: `No one is reported in block ${id} right now.`, focus: { x: b.x + b.w / 2, y: b.y + b.h / 2 } }
     const people = here.filter((a) => a.kind === 'worker').map((a) => `${a.name} (${a.role.toLowerCase()})`)
     const machines = here.filter((a) => a.kind !== 'worker').map((a) => a.name)

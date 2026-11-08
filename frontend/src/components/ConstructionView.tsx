@@ -5,20 +5,21 @@ import { CommandConsole } from './CommandConsole'
 import type { Message } from './CommandConsole'
 import { Topbar } from './Topbar'
 import type { Stage } from './Topbar'
-import { ageSeconds, formatAge, getTwinSource, useTwin } from '../twin/source'
+import { ageSeconds, formatAge, useTwin } from '../twin/source'
+import type { TwinSource } from '../twin/source'
 import { runCommand } from '../twin/commands'
-
-const source = getTwinSource()
+import type { TwinSnapshot } from '../twin/types'
 
 interface Props {
+  source: TwinSource
   surveyLocked: boolean
   onStage: (s: Stage) => void
   messages: Message[]
   addMessages: (m: Omit<Message, 'id'>[]) => void
 }
 
-/** Construction stage (demo): the live site plan with machines, crews and the mesh. */
-export function ConstructionView({ surveyLocked, onStage, messages, addMessages }: Props) {
+/** Construction stage: the approved plan being built live, with machines, crews and the mesh. */
+export function ConstructionView({ source, surveyLocked, onStage, messages, addMessages }: Props) {
   const snapshot = useTwin(source)
   const [expanded, setExpanded] = useState(false)
   const [selectedId, setSelectedId] = useState<string>()
@@ -35,7 +36,7 @@ export function ConstructionView({ surveyLocked, onStage, messages, addMessages 
       if (result.select) setSelectedId(result.select)
       if (result.focus) setFocus({ ...result.focus, key: now })
     },
-    [addMessages],
+    [addMessages, source],
   )
 
   useEffect(() => {
@@ -56,6 +57,7 @@ export function ConstructionView({ surveyLocked, onStage, messages, addMessages 
         title={snapshot.siteName}
         stage="construction"
         surveyLocked={surveyLocked}
+        constructionReady
         onStage={onStage}
         status={[
           { label: `Edge server ${snapshot.edgeServer.online ? 'running' : 'down'}`, tone: snapshot.edgeServer.online ? 'ok' : 'bad' },
@@ -64,6 +66,7 @@ export function ConstructionView({ surveyLocked, onStage, messages, addMessages 
             label: snapshot.uplink.online ? 'HQ uplink up' : `HQ uplink down, last sync ${formatAge(ageSeconds(snapshot.uplink.lastSync, snapshot.now))}`,
             tone: snapshot.uplink.online ? 'ok' : 'idle',
           },
+          { label: `${snapshot.units.filter((u) => u.status === 'installed').length} of ${snapshot.units.length} units set`, tone: 'plain' },
           { label: clock, tone: 'plain' },
         ]}
       />
@@ -76,7 +79,13 @@ export function ConstructionView({ surveyLocked, onStage, messages, addMessages 
         </div>
         {expanded && <StatePanel snapshot={snapshot} selectedId={selectedId} onSelect={setSelectedId} onCommand={handleCommand} />}
       </main>
-      <CommandConsole messages={messages} onSubmit={handleCommand} compact={expanded} />
+      <CommandConsole messages={messages} onSubmit={handleCommand} compact={expanded} examples={constructionExamples(snapshot)} />
     </div>
   )
+}
+
+function constructionExamples(s: TwinSnapshot) {
+  const b = s.blocks[0]?.id ?? 'A'
+  const row = s.units.find((u) => u.block === b)?.row ?? 1
+  return ['status', 'where is RPD-1', `need a telehandler at ${b}${row}`, 'pause CR-1', `who is in block ${b}`, 'network']
 }

@@ -16,7 +16,7 @@ interface Props {
   onSectionClick: (id: string) => void
   onStart: (distanceM: number) => void
   onLock: () => void
-  onOpenConstruction: () => void
+  onOpenBuildup: () => void
 }
 
 export function SurveyMap(props: Props) {
@@ -33,7 +33,7 @@ function fitFor(s: SurveySnapshot): ViewBox {
   return { x: s.launch.x - d, y: s.launch.y - d - extraTop, w: d * 2, h: d * 2 + extraTop }
 }
 
-function SurveyMapInner({ snapshot: s, source, expanded, hideStatus, selectedDrone, onSelectDrone, onSectionClick, onStart, onLock, onOpenConstruction, fit }: Props & { fit: ViewBox }) {
+function SurveyMapInner({ snapshot: s, source, expanded, hideStatus, selectedDrone, onSelectDrone, onSectionClick, onStart, onLock, onOpenBuildup, fit }: Props & { fit: ViewBox }) {
   const [layers, setLayers] = useState({ elevation: true, sections: true, paths: true })
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null)
 
@@ -134,7 +134,7 @@ function SurveyMapInner({ snapshot: s, source, expanded, hideStatus, selectedDro
       </svg>
 
       {s.phase === 'idle' && <StartCard s={s} source={source} onStart={onStart} />}
-      {!hideStatus && <ActionBar s={s} loopPct={loopPct} onSectionClick={onSectionClick} onLock={onLock} onOpenConstruction={onOpenConstruction} />}
+      {!hideStatus && <ActionBar s={s} loopPct={loopPct} onSectionClick={onSectionClick} onLock={onLock} onOpenBuildup={onOpenBuildup} />}
 
       <fieldset className="map__layers">
         <legend className="visually-hidden">Map layers</legend>
@@ -267,7 +267,7 @@ function StartCard({ s, source, onStart }: { s: SurveySnapshot; source: SurveySo
   )
 }
 
-function ActionBar({ s, loopPct, onSectionClick, onLock, onOpenConstruction }: { s: SurveySnapshot; loopPct: number; onSectionClick: (id: string) => void; onLock: () => void; onOpenConstruction: () => void }) {
+function ActionBar({ s, loopPct, onSectionClick, onLock, onOpenBuildup }: { s: SurveySnapshot; loopPct: number; onSectionClick: (id: string) => void; onLock: () => void; onOpenBuildup: () => void }) {
   if (s.phase === 'idle') return null
   const pct = Math.round(s.stats.coverage * 100)
   const flying = s.drones.filter((d) => d.status !== 'docked' && d.status !== 'swapping').length
@@ -296,7 +296,7 @@ function ActionBar({ s, loopPct, onSectionClick, onLock, onOpenConstruction }: {
       )}
       {s.phase === 'locked' && (
         <div className="action-bar__actions">
-          <button type="button" className="btn" onClick={onOpenConstruction}>Open construction demo</button>
+          <button type="button" className="btn btn--primary" onClick={onOpenBuildup}>Plan the buildup</button>
         </div>
       )}
     </div>

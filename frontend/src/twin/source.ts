@@ -1,10 +1,12 @@
 // The UI talks to the twin only through this interface, so the simulator can
 // later be swapped for a live feed from the on-site edge server (e.g. a
-// WebSocket bridged from Zenoh) without touching the components.
+// WebSocket bridged from Zenoh) without touching the components:
+// return your live source from startConstruction() instead of SimulatedSite.
 
 import { useEffect, useSyncExternalStore } from 'react'
 import type { AssetRequest, TwinSnapshot } from './types'
-import { getSimulatedSite } from './simulator'
+import { SimulatedSite } from './simulator'
+import type { SitePlan } from '../buildup/types'
 
 export interface TwinSource {
   start(): void
@@ -19,11 +21,21 @@ export interface TwinSource {
   resolveTarget(text: string): { label: string; x: number; y: number } | undefined
 }
 
-export function getTwinSource(): TwinSource {
-  return getSimulatedSite()
+let current: TwinSource | null = null
+
+/** Start a construction twin for an approved buildup plan (replacing any previous one). */
+export function startConstruction(plan: SitePlan): TwinSource {
+  current?.stop()
+  current = new SimulatedSite(plan)
+  return current
 }
 
-export function useTwin(source: TwinSource = getTwinSource()): TwinSnapshot {
+/** The construction twin, or null until a buildup plan has been approved. */
+export function getTwinSource(): TwinSource | null {
+  return current
+}
+
+export function useTwin(source: TwinSource): TwinSnapshot {
   useEffect(() => {
     source.start()
   }, [source])
